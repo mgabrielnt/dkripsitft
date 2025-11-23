@@ -234,8 +234,13 @@ def main():
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
 
+    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
+    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
+
     print(f"[INFO] Loading {TFT_MASTER_PATH}")
     df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+    df_all = prepare_dataframe(df_all_raw)
+
     df_all = prepare_dataframe(df_all_raw)
 
     baseline_ckpt = exp_cfg["tft_baseline"]["checkpoint_paths"][0]

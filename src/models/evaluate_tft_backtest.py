@@ -252,6 +252,9 @@ def main():
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
 
+    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
+    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
+
     baseline_ckpts = exp_cfg["tft_baseline"]["checkpoint_paths"]
     hybrid_ckpts = exp_cfg["tft_with_sentiment"]["checkpoint_paths"]
 
