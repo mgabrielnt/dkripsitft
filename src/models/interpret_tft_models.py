@@ -22,10 +22,49 @@ TFT_MASTER_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
 OUT_DIR = os.path.join(ROOT_DIR, "reports", "tft_interpretability")
 os.makedirs(OUT_DIR, exist_ok=True)
 
+TIME_FEATURES = ["time_idx", "day_of_week", "month", "is_month_end"]
+BASE_FEATURES = [
+    "close",
+    "volume",
+    "rsi_14",
+    "log_return_1d",
+    "vol_20",
+    "ma_5_div_ma_20",
+]
+SENTIMENT_FEATURES = [
+    "sentiment_mean",
+    "news_count",
+    "sentiment_mean_3d",
+    "news_count_3d",
+    "has_news",
+    "sentiment_shock",
+    "extreme_news",
+]
+REQUIRED_BASE_COLS = ["ticker", *TIME_FEATURES, *BASE_FEATURES, "split"]
+REQUIRED_HYBRID_COLS = [*REQUIRED_BASE_COLS, *SENTIMENT_FEATURES]
+
 
 def load_yaml(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def prepare_dataframe(df_all: pd.DataFrame, required_cols, label: str) -> pd.DataFrame:
+    missing = [c for c in required_cols if c not in df_all.columns]
+    if missing:
+        raise ValueError(
+            f"Kolom {missing} tidak ditemukan di tft_master.csv (untuk {label})."
+        )
+
+    before = len(df_all)
+    df_all = df_all.dropna(subset=required_cols).copy()
+    after = len(df_all)
+    print(f"[INFO] Drop baris NaN untuk {label}: {before} -> {after}")
+
+    df_all["time_idx"] = df_all["time_idx"].astype("int64")
+    df_all["ticker"] = df_all["ticker"].astype("category")
+
+    return df_all
 
 
 def make_val_dataset(df_all: pd.DataFrame, data_cfg, model_cfg, use_sentiment: bool):
@@ -36,45 +75,18 @@ def make_val_dataset(df_all: pd.DataFrame, data_cfg, model_cfg, use_sentiment: b
         data_cfg.get("horizon", 5),
     )
 
-    df_all = df_all.copy()
-    df_all["time_idx"] = df_all["time_idx"].astype("int64")
-    df_all["ticker"] = df_all["ticker"].astype("category")
-
     df_train = df_all[df_all["split"] == "train"].copy()
     df_val = df_all[df_all["split"] == "val"].copy()
 
     static_categoricals = ["ticker"]
     static_reals: list[str] = []
 
-    time_varying_known_reals = [
-        "time_idx",
-        "day_of_week",
-        "month",
-        "is_month_end",
-    ]
+    time_varying_known_reals = TIME_FEATURES
     time_varying_known_categoricals: list[str] = []
 
-    time_varying_unknown_reals = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "ma_5",
-        "ma_10",
-        "ma_20",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-    ]
+    time_varying_unknown_reals = BASE_FEATURES.copy()
     if use_sentiment:
-        time_varying_unknown_reals += [
-            "sentiment_mean",
-            "news_count",
-            "sentiment_mean_3d",
-            "news_count_3d",
-        ]
+        time_varying_unknown_reals += SENTIMENT_FEATURES
 
     time_varying_unknown_categoricals: list[str] = []
 
@@ -229,7 +241,7 @@ def main():
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
 
-    df_all = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+    df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
 
     # Baseline & hybrid checkpoint dari experiments.yaml
     baseline_ckpts = exp_cfg["tft_baseline"]["checkpoint_paths"]
@@ -238,22 +250,31 @@ def main():
     baseline_ckpt = baseline_ckpts[0]
     hybrid_ckpt = hybrid_ckpts[0]
 
+    df_all_base = prepare_dataframe(df_all_raw, REQUIRED_BASE_COLS, "baseline")
+
     # Interpretasi BASELINE (tanpa sentimen)
     interpret_one_model(
         label="baseline",
         ckpt_path=baseline_ckpt,
         use_sentiment=False,
-        df_all=df_all,
+        df_all=df_all_base,
         data_cfg=data_cfg,
         model_cfg=model_cfg,
     )
 
     # Interpretasi HYBRID (dengan sentimen)
+    missing_sent_cols = [c for c in SENTIMENT_FEATURES if c not in df_all_raw.columns]
+    if missing_sent_cols:
+        print(f"[WARN] Kolom sentimen {missing_sent_cols} tidak ada di tft_master. Lewatkan interpretasi HYBRID.")
+        return
+
+    df_all_hybrid = prepare_dataframe(df_all_raw, REQUIRED_HYBRID_COLS, "hybrid")
+
     interpret_one_model(
         label="hybrid",
         ckpt_path=hybrid_ckpt,
         use_sentiment=True,
-        df_all=df_all,
+        df_all=df_all_hybrid,
         data_cfg=data_cfg,
         model_cfg=model_cfg,
     )
