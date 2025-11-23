@@ -1,0 +1,20 @@
+# Konfigurasi data harga saham
+
+tickers:
+  - "BBCA.JK"
+  - "BBRI.JK"
+
+# Periode pengambilan data harga (yfinance)
+start_date: "2020-01-01"
+end_date: "2025-11-23"
+
+# Horizon peramalan (berapa hari ke depan)
+horizon: 5
+
+# Frekuensi data (Business day)
+freq: "B"
+
+# Proporsi split waktu (dipakai di build_tft_master_dataset)
+train_ratio: 0.6
+val_ratio: 0.2
+test_ratio: 0.2

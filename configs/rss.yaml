@@ -1,0 +1,91 @@
+# Sumber referensi utama:
+# - https://www.kontan.co.id/
+# - https://finance.yahoo.com/
+# - https://www.kompas.com/tag/investasi
+
+# Bahasa default kalau tidak disebut di tiap query
+default_language: "id"
+
+# Berapa tahun ke belakang untuk filter tanggal berita
+lookback_years: 5
+
+# Maksimal artikel per query
+max_articles_per_query: 100
+
+queries:
+  # ========== GOOGLE NEWS (BAHASA INDONESIA, UMUM) ==========
+  - type: "google"
+    ticker: "BBCA.JK"
+    language: "id"
+    query: 'BBCA saham OR "Bank Central Asia"'
+
+  - type: "google"
+    ticker: "BBRI.JK"
+    language: "id"
+    query: 'BBRI saham OR "Bank Rakyat Indonesia"'
+
+  # ========== GOOGLE NEWS (BAHASA INDONESIA, FOKUS KONTAN & KOMPAS) ==========
+  # BBCA – berita dari Kontan
+  - type: "google"
+    ticker: "BBCA.JK"
+    language: "id"
+    query: 'site:kontan.co.id (BBCA OR "Bank Central Asia") saham'
+
+  # BBRI – berita dari Kontan
+  - type: "google"
+    ticker: "BBRI.JK"
+    language: "id"
+    query: 'site:kontan.co.id (BBRI OR "Bank Rakyat Indonesia") saham'
+
+  # BBCA – berita dari Kompas Money
+  - type: "google"
+    ticker: "BBCA.JK"
+    language: "id"
+    query: 'site:money.kompas.com (BBCA OR "Bank Central Asia") saham'
+
+  # BBRI – berita dari Kompas Money
+  - type: "google"
+    ticker: "BBRI.JK"
+    language: "id"
+    query: 'site:money.kompas.com (BBRI OR "Bank Rakyat Indonesia") saham'
+
+  # ========== GOOGLE NEWS (BAHASA INGGRIS) ==========
+  - type: "google"
+    ticker: "BBCA.JK"
+    language: "en"
+    query: '"Bank Central Asia" stock OR "BBCA.JK"'
+
+  - type: "google"
+    ticker: "BBRI.JK"
+    language: "en"
+    query: '"Bank Rakyat Indonesia" stock OR "BBRI.JK"'
+
+  # ========== RSS LANGSUNG: YAHOO FINANCE PER TICKER ==========
+  # Yahoo Finance masih menyediakan RSS headline per simbol saham:
+  # https://feeds.finance.yahoo.com/rss/2.0/headline?s={SYMBOL}&region=US&lang=en-US
+  - type: "rss"
+    ticker: "BBCA.JK"
+    rss_url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=BBCA.JK&region=US&lang=en-US"
+    source_name: "Yahoo Finance"
+
+  - type: "rss"
+    ticker: "BBRI.JK"
+    rss_url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=BBRI.JK&region=US&lang=en-US"
+    source_name: "Yahoo Finance"
+
+  # ========== RSS LANGSUNG: KONTAN ==========
+  # Kontan menyediakan RSS resmi, salah satunya kategori Keuangan:
+  # https://rss.kontan.co.id/news/keuangan
+  # Di sini ticker-ku set "IDX" karena ini nggak spesifik ke satu saham.
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://rss.kontan.co.id/news/keuangan"
+    source_name: "Kontan - Keuangan"
+
+  # ========== RSS LANGSUNG: KOMPAS ==========
+  # Kompas punya RSS general via API Feed Social (banyak topik, termasuk ekonomi/keuangan).
+  # Nanti kamu bisa filter sendiri di preprocessing.
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://rss.kompas.com/api/feed/social?apikey=bc58c81819dff4b8d5c53540a2fc7ffd83e6314a"
+    source_name: "Kompas.com (general)"

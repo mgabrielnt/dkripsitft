@@ -1,0 +1,29 @@
+﻿# Environment variables
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.venv/
+venv/
+ENV/
+
+# Data
+data/raw/*
+data/processed/*.csv
+!data/processed/.gitkeep
+
+# Models
+models/checkpoints/*.ckpt
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

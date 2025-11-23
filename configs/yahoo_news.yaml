@@ -1,0 +1,4 @@
+tickers:
+  - "BBCA.JK"
+  - "BBRI.JK"
+lookback_years: 5  # supaya nggak nge-filter tanggal

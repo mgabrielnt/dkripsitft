@@ -1,0 +1,27 @@
+# Target yang diprediksi TFT
+target: "close"
+
+# Panjang encoder/decoder
+max_encoder_length: 60
+max_prediction_length: 5   # kalau tidak dipakai, akan di-override oleh data.horizon
+
+# Training
+batch_size: 64
+max_epochs: 50
+learning_rate: 0.0003      # 3e-4, sedikit lebih kecil untuk hybrid
+
+accelerator: "auto"        # "gpu" kalau nanti pakai GPU
+loss: "mae"                # atau "quantile" kalau mau probabilistic
+
+# --- Default / baseline ---
+hidden_size: 32
+dropout: 0.1
+
+# --- Hybrid (kalau script membaca key ini lebih diutamakan) ---
+hidden_size_hybrid: 64     # lebih besar supaya punya kapasitas baca fitur sentimen
+dropout_hybrid: 0.2        # dropout lebih tinggi untuk cegah overfit pada noise sentimen
+
+# Layer & ukuran internal TFT
+lstm_layers: 2
+attention_head_size: 4
+hidden_continuous_size: 16
