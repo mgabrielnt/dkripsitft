@@ -1,5 +1,13 @@
+"""Bangun dataset TFT gabungan harga + indikator teknikal + sentimen 3-class.
+
+Alir data sentimen:
+1) news_with_sentiment_per_article.csv (processed)
+2) python -m src.data.convert_sentiment_scale -> data/interim/news_with_sentiment_3class.csv
+3) python -m src.data.aggregate_daily_sentiment -> data/processed/daily_sentiment.csv
+4) File ini merge prices_with_indicators.csv + daily_sentiment.csv -> tft_master.csv
+"""
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import pandas as pd
 import yaml
@@ -18,6 +26,15 @@ OUT_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
 def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def ensure_columns(df: pd.DataFrame, cols: List[str], fill_value=0):
+    """Pastikan setiap kolom ada; jika hilang isi dengan fill_value."""
+
+    for col in cols:
+        if col not in df.columns:
+            df[col] = fill_value
+    return df
 
 
 def main():
@@ -39,6 +56,23 @@ def main():
     print(f"[INFO] Loading daily sentiment from {SENTIMENT_PATH}")
     df_s = pd.read_csv(SENTIMENT_PATH, parse_dates=["date"])
 
+    # Pastikan kolom sentimen lengkap meski ada pipeline lama
+    sentiment_cols = [
+        "sentiment_mean",
+        "sentiment_max",
+        "sentiment_min",
+        "sentiment_mean_3d",
+        "sentiment_shock",
+        "news_count",
+        "pos_count",
+        "neg_count",
+        "neu_count",
+        "news_count_3d",
+        "has_news",
+        "extreme_news",
+    ]
+    df_s = ensure_columns(df_s, sentiment_cols, fill_value=0)
+
     # Filter ticker sesuai config (kalau ada)
     if tickers_cfg:
         df_p = df_p[df_p["ticker"].isin(tickers_cfg)].copy()
@@ -59,7 +93,7 @@ def main():
     )
 
     # ==== Isi NaN khusus fitur sentimen ====
-    sentiment_cols = [
+    sentiment_mean_cols = [
         "sentiment_mean",
         "sentiment_max",
         "sentiment_min",
@@ -75,7 +109,7 @@ def main():
     ]
     binary_cols = ["has_news", "extreme_news"]
 
-    for col in sentiment_cols:
+    for col in sentiment_mean_cols:
         if col in df.columns:
             df[col] = df[col].astype(float).fillna(0.0)
 

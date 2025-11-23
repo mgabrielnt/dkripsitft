@@ -1,5 +1,23 @@
+"""Trainer TFT HYBRID dengan fitur sentimen 3-class.
+
+Fitur sentimen mendukung varian HYBRID_v1/v2/v3 (default config: v1):
+- v1: sentiment_mean, news_count, sentiment_mean_3d, news_count_3d, has_news
+- v2: v1 + pos_count, neg_count, neu_count
+- v3: v2 + sentiment_shock, extreme_news (default)
+
+Penstabil tambahan:
+- clipping news_count/shock berbasis quantile train
+- opsional log1p untuk kolom count agar tidak terlalu skewed
+
+Urutan CLI yang disarankan:
+1) python -m src.data.convert_sentiment_scale
+2) python -m src.data.aggregate_daily_sentiment
+3) python -m src.data.build_tft_master_dataset
+4) python -m src.models.train_tft_with_sentiment
+"""
 import os
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -31,11 +49,7 @@ def load_yaml(path: str):
 
 
 def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
-    """Konversi sentimen kontinu menjadi {-1, 0, 1}.
-
-    Threshold > 0 akan mengatur nilai di sekitar nol menjadi 0 untuk
-    mengurangi noise; contoh threshold=0.05 berarti |sentiment|<0.05 => 0.
-    """
+    """Konversi sentimen kontinu menjadi {-1, 0, 1} untuk eksperimen sign-only."""
 
     df = df.copy()
     for col in ["sentiment_mean", "sentiment_mean_3d"]:
@@ -43,9 +57,75 @@ def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFram
             continue
 
         values = df[col].astype(float)
-        signs = values.apply(lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0)))
-        df[col] = signs
+        df[col] = values.apply(
+            lambda v: 0.0
+            if abs(v) < threshold
+            else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0))
+        )
 
+    return df
+
+
+def drop_constant_sentiment_features(
+    df_train: pd.DataFrame, features: list, eps: float = 1e-9
+) -> tuple[list, list]:
+    """Buang fitur sentimen yang konstan agar tidak mengganggu training."""
+
+    kept, dropped = [], []
+    for col in features:
+        if col not in df_train.columns:
+            dropped.append(col)
+            continue
+
+        std = df_train[col].astype(float).std()
+        if pd.isna(std) or std <= eps:
+            dropped.append(col)
+        else:
+            kept.append(col)
+
+    return kept, dropped
+
+
+def clip_sentiment_outliers(
+    df_train: pd.DataFrame,
+    df_all: pd.DataFrame,
+    features: list,
+    quantile: float = 0.995,
+) -> tuple[pd.DataFrame, dict]:
+    """Clipping outlier sentimen (mis. lonjakan news_count) berbasis train quantile."""
+
+    caps = {}
+    quantile = max(min(quantile, 0.999), 0.5)  # jaga rentang aman
+
+    for col in features:
+        if col not in df_train.columns:
+            continue
+
+        series = df_train[col].astype(float)
+        if series.empty:
+            continue
+
+        upper = series.quantile(quantile)
+        lower = series.quantile(1 - quantile) if series.min() < 0 else 0.0
+
+        if pd.isna(upper):
+            continue
+
+        caps[col] = (lower, upper)
+        df_all[col] = df_all[col].astype(float).clip(lower=lower, upper=upper)
+
+    return df_all, caps
+
+
+def log1p_counts(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    """Transformasi log1p untuk kolom count agar distribusi lebih jinak."""
+
+    df = df.copy()
+    for col in cols:
+        if col not in df.columns:
+            continue
+        df[col] = df[col].astype(float)
+        df[col] = (df[col].clip(lower=0)).apply(lambda x: np.log1p(x))
     return df
 
 
@@ -78,6 +158,9 @@ def main():
 
     sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
     sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
+    sentiment_feature_set = str(model_cfg.get("sentiment_feature_set", "v3")).lower()
+    sentiment_clip_quantile = float(model_cfg.get("sentiment_clip_quantile", 0.995))
+    sentiment_log1p_counts = bool(model_cfg.get("sentiment_log1p_counts", False))
 
     # ====== Load data ======
     if not os.path.exists(TFT_MASTER_PATH):
@@ -100,47 +183,54 @@ def main():
     df["time_idx"] = df["time_idx"].astype("int64")
     df["ticker"] = df["ticker"].astype("category")
 
-    # ====== Bersihkan NaN di kolom yang dipakai TFT HYBRID ======
-    required_cols = [
-        "time_idx",
-        "ticker",
-        "day_of_week",
-        "month",
-        "is_month_end",
+    # ====== Definisi fitur ======
+    technical_reals = [
         "close",
         "volume",
         "rsi_14",
         "log_return_1d",
         "vol_20",
         "ma_5_div_ma_20",
-        # sentimen utama
-        "sentiment_mean",
-        "news_count",
-        "sentiment_mean_3d",
-        "news_count_3d",
-        # fitur sentimen baru
-        "has_news",
-        "sentiment_shock",
-        "extreme_news",
-        "split",
     ]
 
-    print("\n[INFO] NaN per kolom (sebelum cleaning):")
-    print(df[required_cols].isna().sum())
+    sentiment_feature_sets = {
+        "v1": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+        ],
+        "v2": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+            "pos_count",
+            "neg_count",
+            "neu_count",
+        ],
+        "v3": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+            "pos_count",
+            "neg_count",
+            "neu_count",
+            "sentiment_shock",
+            "extreme_news",
+        ],
+    }
 
-    before_len = len(df)
-    df = df.dropna(subset=required_cols).copy()
-    after_len = len(df)
-    print(f"[INFO] Drop baris dengan NaN di kolom wajib: {before_len} -> {after_len}")
+    sentiment_reals = sentiment_feature_sets.get(
+        sentiment_feature_set, sentiment_feature_sets["v3"]
+    )
+    if sentiment_feature_set not in sentiment_feature_sets:
+        print(f"[WARN] sentiment_feature_set={sentiment_feature_set} tidak dikenal, pakai v3")
 
-    # ====== Bagi data train / val / test ======
-    df_train = df[df["split"] == "train"].copy()
-    df_val = df[df["split"] == "val"].copy()
-    df_test = df[df["split"] == "test"].copy()
-
-    print(f"[INFO] Train: {len(df_train)}, Val: {len(df_val)}, Test: {len(df_test)}")
-
-    # ====== Definisi fitur TFT HYBRID ======
     static_categoricals = ["ticker"]
     static_reals = []  # close_center/scale otomatis dari GroupNormalizer
 
@@ -154,23 +244,65 @@ def main():
     time_varying_known_categoricals = []
 
     # Observed unknown reals – HARGA + TEKNIKAL + SENTIMEN
-    time_varying_unknown_reals = [
-        "close",
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-        # sentimen level + intensitas
-        "sentiment_mean",
-        "news_count",
-        "sentiment_mean_3d",
-        "news_count_3d",
-        "has_news",
-        "sentiment_shock",
-        "extreme_news",
-    ]
+    time_varying_unknown_reals = technical_reals + sentiment_reals
     time_varying_unknown_categoricals = []
+
+    # ====== Validasi kolom yang wajib ada ======
+    required_cols = (
+        ["time_idx", "ticker", "day_of_week", "month", "is_month_end", target]
+        + technical_reals
+        + sentiment_reals
+        + ["split"]
+    )
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Kolom wajib hilang di tft_master: {missing_cols}")
+
+    # Bersihkan NaN di kolom yang dipakai TFT HYBRID
+    for col in technical_reals + sentiment_reals:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+
+    # ====== Stabilkan fitur sentimen sesuai data yang ada ======
+    df_train_for_clip = df[df["split"] == "train"].copy()
+    sentiment_to_clip = [
+        col
+        for col in sentiment_reals
+        if any(key in col for key in ["news_count", "shock"])
+    ]
+    if sentiment_to_clip:
+        df, clip_caps = clip_sentiment_outliers(
+            df_train_for_clip, df, sentiment_to_clip, quantile=sentiment_clip_quantile
+        )
+        if clip_caps:
+            print("[INFO] Clipping outlier sentimen berdasarkan train quantile:")
+            for k, (lo, hi) in clip_caps.items():
+                print(f"  {k}: [{lo:.3f}, {hi:.3f}]")
+
+    count_like_features = [f for f in sentiment_reals if "count" in f]
+    if sentiment_log1p_counts and count_like_features:
+        df = log1p_counts(df, count_like_features)
+        print(
+            "[INFO] Menerapkan log1p pada fitur hitungan sentimen: "
+            + ", ".join(count_like_features)
+        )
+
+    # Re-split setelah transformasi agar konsisten
+    df_train = df[df["split"] == "train"].copy()
+    df_val = df[df["split"] == "val"].copy()
+    df_test = df[df["split"] == "test"].copy()
+
+    sentiment_reals, dropped_sentiment = drop_constant_sentiment_features(
+        df_train, sentiment_reals
+    )
+    if dropped_sentiment:
+        print(
+            "[WARN] Fitur sentimen dibuang karena konstan/tidak ada: "
+            + ", ".join(dropped_sentiment)
+        )
+    time_varying_unknown_reals = technical_reals + sentiment_reals
+
+    print(f"[INFO] Train: {len(df_train)}, Val: {len(df_val)}, Test: {len(df_test)}")
 
     # ====== Buat TimeSeriesDataSet untuk TRAIN ======
     training = TimeSeriesDataSet(
@@ -274,7 +406,7 @@ def main():
         log_every_n_steps=10,
     )
 
-    # ====== Train ======    
+    # ====== Train ======
     print("[INFO] Start training TFT WITH SENTIMENT...")
     trainer.fit(
         tft,
