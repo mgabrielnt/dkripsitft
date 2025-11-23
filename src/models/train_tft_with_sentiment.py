@@ -61,6 +61,57 @@ def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFram
     return df
 
 
+def drop_constant_sentiment_features(
+    df_train: pd.DataFrame, features: list, eps: float = 1e-9
+) -> tuple[list, list]:
+    """Buang fitur sentimen yang konstan agar tidak mengganggu training."""
+
+    kept, dropped = [], []
+    for col in features:
+        if col not in df_train.columns:
+            dropped.append(col)
+            continue
+
+        std = df_train[col].astype(float).std()
+        if pd.isna(std) or std <= eps:
+            dropped.append(col)
+        else:
+            kept.append(col)
+
+    return kept, dropped
+
+
+def clip_sentiment_outliers(
+    df_train: pd.DataFrame,
+    df_all: pd.DataFrame,
+    features: list,
+    quantile: float = 0.995,
+) -> tuple[pd.DataFrame, dict]:
+    """Clipping outlier sentimen (mis. lonjakan news_count) berbasis train quantile."""
+
+    caps = {}
+    quantile = max(min(quantile, 0.999), 0.5)  # jaga rentang aman
+
+    for col in features:
+        if col not in df_train.columns:
+            continue
+
+        series = df_train[col].astype(float)
+        if series.empty:
+            continue
+
+        upper = series.quantile(quantile)
+        lower = series.quantile(1 - quantile) if series.min() < 0 else 0.0
+
+        if pd.isna(upper):
+            continue
+
+        caps[col] = (lower, upper)
+        df_all[col] = df_all[col].astype(float).clip(lower=lower, upper=upper)
+
+    return df_all, caps
+
+
 def main():
     # ====== Load config ======
     data_cfg = load_yaml(CONFIG_DATA_PATH)
