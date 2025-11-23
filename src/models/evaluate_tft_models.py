@@ -19,10 +19,49 @@ TFT_MASTER_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
 OUT_PRED_BASELINE = os.path.join(DATA_PROCESSED_DIR, "predictions_tft_baseline_test.csv")
 OUT_PRED_HYBRID = os.path.join(DATA_PROCESSED_DIR, "predictions_tft_with_sentiment_test.csv")
 
+TIME_FEATURES = ["time_idx", "day_of_week", "month", "is_month_end"]
+BASE_FEATURES = [
+    "close",
+    "volume",
+    "rsi_14",
+    "log_return_1d",
+    "vol_20",
+    "ma_5_div_ma_20",
+]
+SENTIMENT_FEATURES = [
+    "sentiment_mean",
+    "news_count",
+    "sentiment_mean_3d",
+    "news_count_3d",
+    "has_news",
+    "sentiment_shock",
+    "extreme_news",
+]
+REQUIRED_BASE_COLS = ["ticker", *TIME_FEATURES, *BASE_FEATURES, "split"]
+REQUIRED_HYBRID_COLS = [*REQUIRED_BASE_COLS, *SENTIMENT_FEATURES]
+
 
 def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def prepare_dataframe(df_all: pd.DataFrame, required_cols) -> pd.DataFrame:
+    missing = [c for c in required_cols if c not in df_all.columns]
+    if missing:
+        raise ValueError(
+            "Kolom berikut tidak ditemukan di tft_master.csv: " + ", ".join(missing)
+        )
+
+    before = len(df_all)
+    df_all = df_all.dropna(subset=required_cols).copy()
+    after = len(df_all)
+    print(f"[INFO] Drop baris dengan NaN di kolom wajib: {before} -> {after}")
+
+    df_all["time_idx"] = df_all["time_idx"].astype("int64")
+    df_all["ticker"] = df_all["ticker"].astype("category")
+
+    return df_all
 
 
 def run_model_on_df(
@@ -149,36 +188,20 @@ def main():
     hybrid_ckpt = hybrid_ckpts[0] if hybrid_ckpts else ""
 
     print(f"[INFO] Loading {TFT_MASTER_PATH}")
-    df_all = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+    df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
 
-    print("[INFO] Kolom tersedia:", df_all.columns.tolist())
+    required_for_eval = REQUIRED_BASE_COLS.copy()
+    sentiment_available = not [c for c in SENTIMENT_FEATURES if c not in df_all_raw.columns]
+    if hybrid_ckpt and sentiment_available:
+        required_for_eval = REQUIRED_HYBRID_COLS
 
-    # pastikan tipe data dasar
-    df_all["time_idx"] = df_all["time_idx"].astype("int64")
-    df_all["ticker"] = df_all["ticker"].astype("category")
+    print("[INFO] Kolom tersedia:", df_all_raw.columns.tolist())
 
-    # cek NaN di kolom wajib (baseline)
-    required_cols = [
-        "time_idx",
-        "ticker",
-        "day_of_week",
-        "month",
-        "is_month_end",
-        "close",
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-        "split",
-    ]
+    # cek NaN di kolom wajib (baseline/hybrid)
     print("\n[INFO] NaN per kolom (sebelum cleaning) di df_all:")
-    print(df_all[required_cols].isna().sum())
+    print(df_all_raw[required_for_eval].isna().sum())
 
-    before = len(df_all)
-    df_all = df_all.dropna(subset=required_cols)
-    after = len(df_all)
-    print(f"[INFO] Drop baris dengan NaN di kolom wajib: {before} -> {after}")
+    df_all = prepare_dataframe(df_all_raw, required_for_eval)
 
     # hanya info jumlah test
     test_rows = (df_all["split"] == "test").sum()
@@ -230,8 +253,7 @@ def main():
         return
 
     # Optional: cek apakah kolom sentimen ada
-    required_sent_cols = ["sentiment_mean", "news_count", "sentiment_mean_3d", "news_count_3d"]
-    missing_sent_cols = [c for c in required_sent_cols if c not in df_all.columns]
+    missing_sent_cols = [c for c in SENTIMENT_FEATURES if c not in df_all.columns]
     if missing_sent_cols:
         print(f"[WARN] Kolom sentimen {missing_sent_cols} tidak ada di tft_master. Lewatkan evaluasi HYBRID.")
         print("\n========== RINGKASAN (HANYA BASELINE) ==========")
