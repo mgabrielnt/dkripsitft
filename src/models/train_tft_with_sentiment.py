@@ -142,7 +142,6 @@ def main():
     sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
     sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
     sentiment_feature_set = str(model_cfg.get("sentiment_feature_set", "v3")).lower()
-    sentiment_clip_quantile = float(model_cfg.get("sentiment_clip_quantile", 0.995))
 
     # ====== Load data ======
     if not os.path.exists(TFT_MASTER_PATH):
@@ -248,31 +247,6 @@ def main():
     df_train = df[df["split"] == "train"].copy()
     df_val = df[df["split"] == "val"].copy()
     df_test = df[df["split"] == "test"].copy()
-
-    # ====== Stabilkan fitur sentimen sesuai data yang ada ======
-    sentiment_to_clip = [
-        col
-        for col in sentiment_reals
-        if any(key in col for key in ["news_count", "shock"])
-    ]
-    if sentiment_to_clip:
-        df, clip_caps = clip_sentiment_outliers(
-            df_train, df, sentiment_to_clip, quantile=sentiment_clip_quantile
-        )
-        if clip_caps:
-            print("[INFO] Clipping outlier sentimen berdasarkan train quantile:")
-            for k, (lo, hi) in clip_caps.items():
-                print(f"  {k}: [{lo:.3f}, {hi:.3f}]")
-
-    sentiment_reals, dropped_sentiment = drop_constant_sentiment_features(
-        df_train, sentiment_reals
-    )
-    if dropped_sentiment:
-        print(
-            "[WARN] Fitur sentimen dibuang karena konstan/tidak ada: "
-            + ", ".join(dropped_sentiment)
-        )
-    time_varying_unknown_reals = technical_reals + sentiment_reals
 
     print(f"[INFO] Train: {len(df_train)}, Val: {len(df_val)}, Test: {len(df_test)}")
 
