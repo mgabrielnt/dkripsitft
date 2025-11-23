@@ -20,6 +20,8 @@ dropout: 0.1
 # --- Hybrid (kalau script membaca key ini lebih diutamakan) ---
 hidden_size_hybrid: 64     # lebih besar supaya punya kapasitas baca fitur sentimen
 dropout_hybrid: 0.2        # dropout lebih tinggi untuk cegah overfit pada noise sentimen
+sentiment_representation: "raw"      # "raw" untuk nilai kontinu, "sign" untuk -1/0/1
+sentiment_bucket_threshold: 0.05     # ambang netral jika memakai "sign" (|x| < threshold => 0)
 
 # Layer & ukuran internal TFT
 lstm_layers: 2

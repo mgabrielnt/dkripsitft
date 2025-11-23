@@ -22,10 +22,71 @@ CONFIG_EXPERIMENTS_PATH = os.path.join(ROOT_DIR, "configs", "experiments.yaml")
 
 TFT_MASTER_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
 
+TIME_FEATURES = ["time_idx", "day_of_week", "month", "is_month_end"]
+BASE_FEATURES = [
+    "close",
+    "volume",
+    "rsi_14",
+    "log_return_1d",
+    "vol_20",
+    "ma_5_div_ma_20",
+]
+SENTIMENT_FEATURES = [
+    "sentiment_mean",
+    "news_count",
+    "sentiment_mean_3d",
+    "news_count_3d",
+    "has_news",
+    "sentiment_shock",
+    "extreme_news",
+]
+REQUIRED_BASE_COLS = ["ticker", *TIME_FEATURES, *BASE_FEATURES, "split"]
+REQUIRED_HYBRID_COLS = [*REQUIRED_BASE_COLS, *SENTIMENT_FEATURES]
+
 
 def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
+    """Ubah sentimen kontinu menjadi {-1,0,1} dengan ambang netral."""
+
+    df = df.copy()
+    for col in ["sentiment_mean", "sentiment_mean_3d"]:
+        if col not in df.columns:
+            continue
+
+        values = df[col].astype(float)
+        df[col] = values.apply(
+            lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0))
+        )
+
+    return df
+
+
+def prepare_dataframe(df_all: pd.DataFrame) -> pd.DataFrame:
+    """
+    Pastikan kolom wajib tersedia & tidak ada NaN untuk baseline/hybrid.
+    Untuk perbandingan yang adil, kita pakai subset data yang memiliki
+    seluruh kolom (teknikal + sentimen).
+    """
+
+    missing = [c for c in REQUIRED_HYBRID_COLS if c not in df_all.columns]
+    if missing:
+        raise ValueError(
+            "Kolom berikut tidak ditemukan di tft_master.csv: " + ", ".join(missing)
+        )
+
+    before = len(df_all)
+    df_all = df_all.dropna(subset=REQUIRED_HYBRID_COLS).copy()
+    after = len(df_all)
+    print(f"[INFO] Drop baris dengan NaN di kolom wajib: {before} -> {after}")
+
+    df_all["time_idx"] = df_all["time_idx"].astype("int64")
+    df_all["ticker"] = df_all["ticker"].astype("category")
+
+    return df_all
 
 
 def make_datasets_for_mode(
@@ -46,45 +107,18 @@ def make_datasets_for_mode(
         data_cfg.get("horizon", 5),
     )
 
-    df_all = df_all.copy()
-    df_all["time_idx"] = df_all["time_idx"].astype("int64")
-    df_all["ticker"] = df_all["ticker"].astype("category")
-
     df_train = df_all[df_all["split"] == "train"].copy()
     df_test = df_all[df_all["split"] == "test"].copy()
 
     static_categoricals = ["ticker"]
     static_reals: list[str] = []
 
-    time_varying_known_reals = [
-        "time_idx",
-        "day_of_week",
-        "month",
-        "is_month_end",
-    ]
+    time_varying_known_reals = TIME_FEATURES
     time_varying_known_categoricals: list[str] = []
 
-    time_varying_unknown_reals = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "ma_5",
-        "ma_10",
-        "ma_20",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-    ]
+    time_varying_unknown_reals = BASE_FEATURES.copy()
     if use_sentiment:
-        time_varying_unknown_reals += [
-            "sentiment_mean",
-            "news_count",
-            "sentiment_mean_3d",
-            "news_count_3d",
-        ]
+        time_varying_unknown_reals += SENTIMENT_FEATURES
 
     time_varying_unknown_categoricals: list[str] = []
 
@@ -195,7 +229,11 @@ def get_h1_predictions(
 
 def metrics(y_true: pd.Series, y_pred: pd.Series):
     mae = mean_absolute_error(y_true, y_pred)
-    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    # sklearn < 0.22 tidak mendukung argumen squared; fallback manual untuk kompatibilitas
+    try:
+        rmse = mean_squared_error(y_true, y_pred, squared=False)
+    except TypeError:
+        rmse = mean_squared_error(y_true, y_pred) ** 0.5
     mape = (
         (y_true - y_pred)
         .abs()
@@ -212,14 +250,19 @@ def main():
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
 
-    print(f"[INFO] Loading {TFT_MASTER_PATH}")
-    df_all = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
+    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
 
-    if "news_count" not in df_all.columns:
-        raise ValueError(
-            "Kolom 'news_count' tidak ditemukan di tft_master.csv. "
-            "Pastikan pipeline sentiment sudah menambahkan kolom ini."
+    print(f"[INFO] Loading {TFT_MASTER_PATH}")
+    df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+
+    if sentiment_repr == "sign":
+        df_all_raw = bucketize_sentiment(df_all_raw, threshold=sentiment_threshold)
+        print(
+            f"[INFO] Representasi sentimen sign (-1/0/1) diaktifkan (threshold {sentiment_threshold})"
         )
+
+    df_all = prepare_dataframe(df_all_raw)
 
     baseline_ckpt = exp_cfg["tft_baseline"]["checkpoint_paths"][0]
     hybrid_ckpt = exp_cfg["tft_with_sentiment"]["checkpoint_paths"][0]

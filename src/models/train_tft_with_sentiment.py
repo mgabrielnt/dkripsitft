@@ -30,6 +30,25 @@ def load_yaml(path: str):
         return yaml.safe_load(f)
 
 
+def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
+    """Konversi sentimen kontinu menjadi {-1, 0, 1}.
+
+    Threshold > 0 akan mengatur nilai di sekitar nol menjadi 0 untuk
+    mengurangi noise; contoh threshold=0.05 berarti |sentiment|<0.05 => 0.
+    """
+
+    df = df.copy()
+    for col in ["sentiment_mean", "sentiment_mean_3d"]:
+        if col not in df.columns:
+            continue
+
+        values = df[col].astype(float)
+        signs = values.apply(lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0)))
+        df[col] = signs
+
+    return df
+
+
 def main():
     # ====== Load config ======
     data_cfg = load_yaml(CONFIG_DATA_PATH)
@@ -57,12 +76,21 @@ def main():
     hidden_size = model_cfg.get("hidden_size_hybrid", model_cfg.get("hidden_size", 32))
     dropout = model_cfg.get("dropout_hybrid", model_cfg.get("dropout", 0.1))
 
+    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
+    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
+
     # ====== Load data ======
     if not os.path.exists(TFT_MASTER_PATH):
         raise FileNotFoundError(f"Tidak ditemukan: {TFT_MASTER_PATH}")
 
     print(f"[INFO] Loading {TFT_MASTER_PATH}")
     df = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+
+    if sentiment_repr == "sign":
+        df = bucketize_sentiment(df, threshold=sentiment_threshold)
+        print(
+            f"[INFO] Menggunakan representasi sentimen sign (-1/0/1) dengan threshold {sentiment_threshold}"
+        )
 
     print("[INFO] Sample columns:", df.columns.tolist())
     print("[INFO] Split counts:")
