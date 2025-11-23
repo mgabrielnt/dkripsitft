@@ -213,7 +213,11 @@ def get_h1_predictions(
 
 def metrics(y_true: pd.Series, y_pred: pd.Series):
     mae = mean_absolute_error(y_true, y_pred)
-    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    # sklearn < 0.22 tidak mendukung argumen squared; fallback manual untuk kompatibilitas
+    try:
+        rmse = mean_squared_error(y_true, y_pred, squared=False)
+    except TypeError:
+        rmse = mean_squared_error(y_true, y_pred) ** 0.5
     mape = (
         (y_true - y_pred)
         .abs()
