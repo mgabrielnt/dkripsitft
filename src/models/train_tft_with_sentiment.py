@@ -1,13 +1,9 @@
 """Trainer TFT HYBRID dengan fitur sentimen 3-class.
 
-Fitur sentimen mendukung varian HYBRID_v1/v2/v3 (default config: v1):
+Fitur sentimen default mengikuti varian HYBRID_v3:
 - v1: sentiment_mean, news_count, sentiment_mean_3d, news_count_3d, has_news
 - v2: v1 + pos_count, neg_count, neu_count
 - v3: v2 + sentiment_shock, extreme_news (default)
-
-Penstabil tambahan:
-- clipping news_count/shock berbasis quantile train
-- opsional log1p untuk kolom count agar tidak terlalu skewed
 
 Urutan CLI yang disarankan:
 1) python -m src.data.convert_sentiment_scale
@@ -117,18 +113,6 @@ def clip_sentiment_outliers(
     return df_all, caps
 
 
-def log1p_counts(df: pd.DataFrame, cols: list) -> pd.DataFrame:
-    """Transformasi log1p untuk kolom count agar distribusi lebih jinak."""
-
-    df = df.copy()
-    for col in cols:
-        if col not in df.columns:
-            continue
-        df[col] = df[col].astype(float)
-        df[col] = (df[col].clip(lower=0)).apply(lambda x: np.log1p(x))
-    return df
-
-
 def main():
     # ====== Load config ======
     data_cfg = load_yaml(CONFIG_DATA_PATH)
@@ -159,8 +143,6 @@ def main():
     sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
     sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
     sentiment_feature_set = str(model_cfg.get("sentiment_feature_set", "v3")).lower()
-    sentiment_clip_quantile = float(model_cfg.get("sentiment_clip_quantile", 0.995))
-    sentiment_log1p_counts = bool(model_cfg.get("sentiment_log1p_counts", False))
 
     # ====== Load data ======
     if not os.path.exists(TFT_MASTER_PATH):
@@ -263,44 +245,9 @@ def main():
         if col in df.columns:
             df[col] = df[col].fillna(0)
 
-    # ====== Stabilkan fitur sentimen sesuai data yang ada ======
-    df_train_for_clip = df[df["split"] == "train"].copy()
-    sentiment_to_clip = [
-        col
-        for col in sentiment_reals
-        if any(key in col for key in ["news_count", "shock"])
-    ]
-    if sentiment_to_clip:
-        df, clip_caps = clip_sentiment_outliers(
-            df_train_for_clip, df, sentiment_to_clip, quantile=sentiment_clip_quantile
-        )
-        if clip_caps:
-            print("[INFO] Clipping outlier sentimen berdasarkan train quantile:")
-            for k, (lo, hi) in clip_caps.items():
-                print(f"  {k}: [{lo:.3f}, {hi:.3f}]")
-
-    count_like_features = [f for f in sentiment_reals if "count" in f]
-    if sentiment_log1p_counts and count_like_features:
-        df = log1p_counts(df, count_like_features)
-        print(
-            "[INFO] Menerapkan log1p pada fitur hitungan sentimen: "
-            + ", ".join(count_like_features)
-        )
-
-    # Re-split setelah transformasi agar konsisten
     df_train = df[df["split"] == "train"].copy()
     df_val = df[df["split"] == "val"].copy()
     df_test = df[df["split"] == "test"].copy()
-
-    sentiment_reals, dropped_sentiment = drop_constant_sentiment_features(
-        df_train, sentiment_reals
-    )
-    if dropped_sentiment:
-        print(
-            "[WARN] Fitur sentimen dibuang karena konstan/tidak ada: "
-            + ", ".join(dropped_sentiment)
-        )
-    time_varying_unknown_reals = technical_reals + sentiment_reals
 
     print(f"[INFO] Train: {len(df_train)}, Val: {len(df_val)}, Test: {len(df_test)}")
 
