@@ -21,10 +21,65 @@ CONFIG_EXPERIMENTS_PATH = os.path.join(ROOT_DIR, "configs", "experiments.yaml")
 
 TFT_MASTER_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
 
+TIME_FEATURES = ["time_idx", "day_of_week", "month", "is_month_end"]
+BASE_FEATURES = [
+    "close",
+    "volume",
+    "rsi_14",
+    "log_return_1d",
+    "vol_20",
+    "ma_5_div_ma_20",
+]
+SENTIMENT_FEATURES = [
+    "sentiment_mean",
+    "news_count",
+    "sentiment_mean_3d",
+    "news_count_3d",
+    "has_news",
+    "sentiment_shock",
+    "extreme_news",
+]
+REQUIRED_BASE_COLS = ["ticker", *TIME_FEATURES, *BASE_FEATURES, "split"]
+REQUIRED_HYBRID_COLS = [*REQUIRED_BASE_COLS, *SENTIMENT_FEATURES]
+
 
 def load_yaml(path: str) -> Dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
+    """Ubah sentimen kontinu menjadi {-1,0,1} dengan ambang netral."""
+
+    df = df.copy()
+    for col in ["sentiment_mean", "sentiment_mean_3d"]:
+        if col not in df.columns:
+            continue
+
+        values = df[col].astype(float)
+        df[col] = values.apply(
+            lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0))
+        )
+
+    return df
+
+
+def prepare_dataframe(df_all: pd.DataFrame, required_cols: List[str], label: str) -> pd.DataFrame:
+    missing = [c for c in required_cols if c not in df_all.columns]
+    if missing:
+        raise ValueError(
+            f"Kolom {missing} tidak ditemukan di tft_master.csv (dibutuhkan untuk {label})."
+        )
+
+    before = len(df_all)
+    df_clean = df_all.dropna(subset=required_cols).copy()
+    after = len(df_clean)
+    print(f"[INFO] Drop baris NaN untuk {label}: {before} -> {after}")
+
+    df_clean["time_idx"] = df_clean["time_idx"].astype("int64")
+    df_clean["ticker"] = df_clean["ticker"].astype("category")
+
+    return df_clean
 
 
 def make_training_dataset(
@@ -53,35 +108,15 @@ def make_training_dataset(
     static_categoricals = ["ticker"]
     static_reals: List[str] = []
 
-    time_varying_known_reals = [
-        "time_idx",
-        "day_of_week",
-        "month",
-        "is_month_end",
-    ]
+    time_varying_known_reals = TIME_FEATURES
     time_varying_known_categoricals: List[str] = []
 
     # === Fitur teknikal VIF sehat, sama seperti train_tft_baseline.py ===
-    time_varying_unknown_reals = [
-        "close",
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-    ]
+    time_varying_unknown_reals = BASE_FEATURES.copy()
 
     if use_sentiment:
         # === Tambahan fitur sentimen, sama persis dengan train_tft_with_sentiment.py ===
-        time_varying_unknown_reals += [
-            "sentiment_mean",
-            "news_count",
-            "sentiment_mean_3d",
-            "news_count_3d",
-            "has_news",
-            "sentiment_shock",
-            "extreme_news",
-        ]
+        time_varying_unknown_reals += SENTIMENT_FEATURES
 
     time_varying_unknown_categoricals: List[str] = []
 
@@ -233,6 +268,9 @@ def main():
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
 
+    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
+    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
+
     baseline_ckpts = exp_cfg["tft_baseline"]["checkpoint_paths"]
     hybrid_ckpts = exp_cfg["tft_with_sentiment"]["checkpoint_paths"]
 
@@ -240,38 +278,23 @@ def main():
     hybrid_ckpt = hybrid_ckpts[0] if hybrid_ckpts else ""
 
     print(f"[INFO] Loading {TFT_MASTER_PATH}")
-    df_all = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+    df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
 
-    # pastikan tipe
-    df_all["time_idx"] = df_all["time_idx"].astype("int64")
-    df_all["ticker"] = df_all["ticker"].astype("category")
+    if sentiment_repr == "sign":
+        df_all_raw = bucketize_sentiment(df_all_raw, threshold=sentiment_threshold)
+        print(
+            f"[INFO] Representasi sentimen sign (-1/0/1) diaktifkan (threshold {sentiment_threshold})"
+        )
+
+    df_all_base = prepare_dataframe(df_all_raw, REQUIRED_BASE_COLS, "baseline")
 
     print("\n========== BACKTEST TFT BASELINE ==========")
 
     # kolom wajib (tanpa sentimen, sama seperti evaluate_tft_models baseline)
-    required_cols = [
-        "time_idx",
-        "ticker",
-        "day_of_week",
-        "month",
-        "is_month_end",
-        "close",
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-        "split",
-    ]
-    print("\n[INFO] NaN per kolom (sebelum cleaning) di df_all:")
-    print(df_all[required_cols].isna().sum())
+    print("\n[INFO] NaN per kolom (sebelum cleaning) di df_all (baseline):")
+    print(df_all_base[REQUIRED_BASE_COLS].isna().sum())
 
-    before = len(df_all)
-    df_all = df_all.dropna(subset=required_cols)
-    after = len(df_all)
-    print(f"[INFO] Drop baris dengan NaN di kolom wajib: {before} -> {after}")
-
-    df_test = df_all[df_all["split"] == "test"].copy()
+    df_test = df_all_base[df_all_base["split"] == "test"].copy()
     print(f"[INFO] Total test rows: {len(df_test)}")
 
     # bangun window waktu dari test set
@@ -283,7 +306,7 @@ def main():
     else:
         # training dataset baseline
         training_base = make_training_dataset(
-            df_all=df_all,
+            df_all=df_all_base,
             data_cfg=data_cfg,
             model_cfg=model_cfg,
             use_sentiment=False,
@@ -320,29 +343,22 @@ def main():
         return
 
     # Pastikan semua kolom sentimen tersedia
-    required_sent_cols = [
-        "sentiment_mean",
-        "news_count",
-        "sentiment_mean_3d",
-        "news_count_3d",
-        "has_news",
-        "sentiment_shock",
-        "extreme_news",
-    ]
-    missing_sent_cols = [c for c in required_sent_cols if c not in df_all.columns]
+    missing_sent_cols = [c for c in SENTIMENT_FEATURES if c not in df_all_raw.columns]
     if missing_sent_cols:
         print(f"[WARN] Kolom sentimen {missing_sent_cols} tidak ada di tft_master. Lewatkan BACKTEST HYBRID.")
         return
 
+    df_all_hybrid = prepare_dataframe(df_all_raw, REQUIRED_HYBRID_COLS, "hybrid")
+
     training_hybrid = make_training_dataset(
-        df_all=df_all,
+        df_all=df_all_hybrid,
         data_cfg=data_cfg,
         model_cfg=model_cfg,
         use_sentiment=True,
     )
 
     print("\n==== HYBRID ====\n")
-    for win_name, df_win in windows.items():
+    for win_name, df_win in build_windows(df_all_hybrid[df_all_hybrid["split"] == "test"]).items():
         if df_win.empty:
             print(f"[Window: {win_name}] (skip, kosong)")
             continue
