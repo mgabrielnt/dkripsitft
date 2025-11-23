@@ -1,3 +1,16 @@
+"""Trainer TFT HYBRID dengan fitur sentimen 3-class.
+
+Fitur sentimen default mengikuti varian HYBRID_v3:
+- v1: sentiment_mean, news_count, sentiment_mean_3d, news_count_3d, has_news
+- v2: v1 + pos_count, neg_count, neu_count
+- v3: v2 + sentiment_shock, extreme_news (default)
+
+Urutan CLI yang disarankan:
+1) python -m src.data.convert_sentiment_scale
+2) python -m src.data.aggregate_daily_sentiment
+3) python -m src.data.build_tft_master_dataset
+4) python -m src.models.train_tft_with_sentiment
+"""
 import os
 
 import pandas as pd
@@ -31,11 +44,7 @@ def load_yaml(path: str):
 
 
 def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
-    """Konversi sentimen kontinu menjadi {-1, 0, 1}.
-
-    Threshold > 0 akan mengatur nilai di sekitar nol menjadi 0 untuk
-    mengurangi noise; contoh threshold=0.05 berarti |sentiment|<0.05 => 0.
-    """
+    """Konversi sentimen kontinu menjadi {-1, 0, 1} untuk eksperimen sign-only."""
 
     df = df.copy()
     for col in ["sentiment_mean", "sentiment_mean_3d"]:
@@ -43,8 +52,11 @@ def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFram
             continue
 
         values = df[col].astype(float)
-        signs = values.apply(lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0)))
-        df[col] = signs
+        df[col] = values.apply(
+            lambda v: 0.0
+            if abs(v) < threshold
+            else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0))
+        )
 
     return df
 
@@ -78,6 +90,7 @@ def main():
 
     sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
     sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
+    sentiment_feature_set = str(model_cfg.get("sentiment_feature_set", "v3")).lower()
 
     # ====== Load data ======
     if not os.path.exists(TFT_MASTER_PATH):
@@ -100,47 +113,54 @@ def main():
     df["time_idx"] = df["time_idx"].astype("int64")
     df["ticker"] = df["ticker"].astype("category")
 
-    # ====== Bersihkan NaN di kolom yang dipakai TFT HYBRID ======
-    required_cols = [
-        "time_idx",
-        "ticker",
-        "day_of_week",
-        "month",
-        "is_month_end",
+    # ====== Definisi fitur ======
+    technical_reals = [
         "close",
         "volume",
         "rsi_14",
         "log_return_1d",
         "vol_20",
         "ma_5_div_ma_20",
-        # sentimen utama
-        "sentiment_mean",
-        "news_count",
-        "sentiment_mean_3d",
-        "news_count_3d",
-        # fitur sentimen baru
-        "has_news",
-        "sentiment_shock",
-        "extreme_news",
-        "split",
     ]
 
-    print("\n[INFO] NaN per kolom (sebelum cleaning):")
-    print(df[required_cols].isna().sum())
+    sentiment_feature_sets = {
+        "v1": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+        ],
+        "v2": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+            "pos_count",
+            "neg_count",
+            "neu_count",
+        ],
+        "v3": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+            "pos_count",
+            "neg_count",
+            "neu_count",
+            "sentiment_shock",
+            "extreme_news",
+        ],
+    }
 
-    before_len = len(df)
-    df = df.dropna(subset=required_cols).copy()
-    after_len = len(df)
-    print(f"[INFO] Drop baris dengan NaN di kolom wajib: {before_len} -> {after_len}")
+    sentiment_reals = sentiment_feature_sets.get(
+        sentiment_feature_set, sentiment_feature_sets["v3"]
+    )
+    if sentiment_feature_set not in sentiment_feature_sets:
+        print(f"[WARN] sentiment_feature_set={sentiment_feature_set} tidak dikenal, pakai v3")
 
-    # ====== Bagi data train / val / test ======
-    df_train = df[df["split"] == "train"].copy()
-    df_val = df[df["split"] == "val"].copy()
-    df_test = df[df["split"] == "test"].copy()
-
-    print(f"[INFO] Train: {len(df_train)}, Val: {len(df_val)}, Test: {len(df_test)}")
-
-    # ====== Definisi fitur TFT HYBRID ======
     static_categoricals = ["ticker"]
     static_reals = []  # close_center/scale otomatis dari GroupNormalizer
 
@@ -154,23 +174,30 @@ def main():
     time_varying_known_categoricals = []
 
     # Observed unknown reals – HARGA + TEKNIKAL + SENTIMEN
-    time_varying_unknown_reals = [
-        "close",
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-        # sentimen level + intensitas
-        "sentiment_mean",
-        "news_count",
-        "sentiment_mean_3d",
-        "news_count_3d",
-        "has_news",
-        "sentiment_shock",
-        "extreme_news",
-    ]
+    time_varying_unknown_reals = technical_reals + sentiment_reals
     time_varying_unknown_categoricals = []
+
+    # ====== Validasi kolom yang wajib ada ======
+    required_cols = (
+        ["time_idx", "ticker", "day_of_week", "month", "is_month_end", target]
+        + technical_reals
+        + sentiment_reals
+        + ["split"]
+    )
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Kolom wajib hilang di tft_master: {missing_cols}")
+
+    # Bersihkan NaN di kolom yang dipakai TFT HYBRID
+    for col in technical_reals + sentiment_reals:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+
+    df_train = df[df["split"] == "train"].copy()
+    df_val = df[df["split"] == "val"].copy()
+    df_test = df[df["split"] == "test"].copy()
+
+    print(f"[INFO] Train: {len(df_train)}, Val: {len(df_val)}, Test: {len(df_test)}")
 
     # ====== Buat TimeSeriesDataSet untuk TRAIN ======
     training = TimeSeriesDataSet(
@@ -274,7 +301,7 @@ def main():
         log_every_n_steps=10,
     )
 
-    # ====== Train ======    
+    # ====== Train ======
     print("[INFO] Start training TFT WITH SENTIMENT...")
     trainer.fit(
         tft,
