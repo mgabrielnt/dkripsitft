@@ -49,22 +49,6 @@ def load_yaml(path: str):
         return yaml.safe_load(f)
 
 
-def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
-    """Ubah sentimen kontinu menjadi {-1,0,1} dengan ambang netral."""
-
-    df = df.copy()
-    for col in ["sentiment_mean", "sentiment_mean_3d"]:
-        if col not in df.columns:
-            continue
-
-        values = df[col].astype(float)
-        df[col] = values.apply(
-            lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0))
-        )
-
-    return df
-
-
 def prepare_dataframe(df_all: pd.DataFrame, required_cols, label: str) -> pd.DataFrame:
     missing = [c for c in required_cols if c not in df_all.columns]
     if missing:
@@ -257,16 +241,7 @@ def main():
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
 
-    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
-    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
-
     df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
-
-    if sentiment_repr == "sign":
-        df_all_raw = bucketize_sentiment(df_all_raw, threshold=sentiment_threshold)
-        print(
-            f"[INFO] Representasi sentimen sign (-1/0/1) diaktifkan (threshold {sentiment_threshold})"
-        )
 
     # Baseline & hybrid checkpoint dari experiments.yaml
     baseline_ckpts = exp_cfg["tft_baseline"]["checkpoint_paths"]

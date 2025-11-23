@@ -46,22 +46,6 @@ def load_yaml(path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
-    """Ubah sentimen kontinu menjadi {-1,0,1} dengan ambang netral."""
-
-    df = df.copy()
-    for col in ["sentiment_mean", "sentiment_mean_3d"]:
-        if col not in df.columns:
-            continue
-
-        values = df[col].astype(float)
-        df[col] = values.apply(
-            lambda v: 0.0 if abs(v) < threshold else (1.0 if v > 0 else (-1.0 if v < 0 else 0.0))
-        )
-
-    return df
-
-
 def prepare_dataframe(df_all: pd.DataFrame, required_cols) -> pd.DataFrame:
     missing = [c for c in required_cols if c not in df_all.columns]
     if missing:
@@ -208,12 +192,6 @@ def main():
 
     print(f"[INFO] Loading {TFT_MASTER_PATH}")
     df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
-
-    if sentiment_repr == "sign":
-        df_all_raw = bucketize_sentiment(df_all_raw, threshold=sentiment_threshold)
-        print(
-            f"[INFO] Representasi sentimen sign (-1/0/1) diaktifkan (threshold {sentiment_threshold})"
-        )
 
     required_for_eval = REQUIRED_BASE_COLS.copy()
     sentiment_available = not [c for c in SENTIMENT_FEATURES if c not in df_all_raw.columns]
