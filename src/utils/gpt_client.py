@@ -1,4 +1,5 @@
 import os
+from functools import lru_cache
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -12,19 +13,7 @@ CONFIG_GPT_PATH = os.path.join(ROOT_DIR, "configs", "gpt_sentiment.yaml")
 # Load .env dari root project
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY tidak ditemukan di .env")
-
-# Client OpenAI
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_BASE_URL,
-)
-
-# Load konfigurasi sentimen dari YAML
+# Load konfigurasi sentimen dari YAML (tidak tergantung kunci API)
 with open(CONFIG_GPT_PATH, "r", encoding="utf-8") as f:
     GPT_CONFIG = yaml.safe_load(f)
 
@@ -34,41 +23,43 @@ TEMPERATURE = float(GPT_CONFIG.get("temperature", 1.0))
 MAX_TOKENS = int(
     GPT_CONFIG.get("max_completion_tokens", GPT_CONFIG.get("max_tokens", 5))
 )
+MAX_CHARS = int(GPT_CONFIG.get("text", {}).get("max_chars", 2000))
 
 SentimentLabel = Literal[
-    "SANGAT_NEGATIF",
     "NEGATIF",
     "NETRAL",
     "POSITIF",
-    "SANGAT_POSITIF",
 ]
 
 
 def build_prompt(text: str) -> str:
     """
-    Prompt untuk klasifikasi sentimen berita saham 5-level.
-    Fokus pada dampak jangka sangat pendek (1–5 hari ke depan).
+    Prompt 3-level untuk L_text sesuai spesifikasi multi-sumber.
+
+    Fokus utama: apakah isi teks (judul + lead + kalimat relevan ke emiten)
+    membuat investor ingin beli/jual saham perusahaan tersebut.
     """
     labels_str = ", ".join(LABELS)
     prompt = f"""
-Anda adalah analis sentimen khusus berita saham.
+Anda adalah analis sentimen khusus berita emiten.
 
-Tugas Anda:
-1. Baca teks berita berikut.
-2. Nilai DAMPAK berita terhadap pergerakan harga saham
-   dalam jangka sangat pendek (1–5 hari ke depan).
-3. Klasifikasikan sentimen menjadi salah satu dari:
-   - SANGAT_NEGATIF : sangat mungkin menurunkan harga secara signifikan
-   - NEGATIF        : cenderung menurunkan harga
-   - NETRAL         : tidak jelas / dampak kecil
-   - POSITIF        : cenderung menaikkan harga
-   - SANGAT_POSITIF : sangat mungkin menaikkan harga secara signifikan
-4. Jawab HANYA dengan salah satu kata berikut (tanpa penjelasan lain):
-   {labels_str}
+Label yang diizinkan:
+- NEGATIF (-1): berita utama bertone buruk, memicu kekhawatiran investor
+- NETRAL  (0) : deskriptif/administratif atau dampak tidak jelas
+- POSITIF (+1): berita utama bertone baik, mendorong optimisme investor
 
-Teks berita:
-\"\"\"{text}\"\"\"
-"""
+Aturan ringkas:
+- POSITIF jika kinerja/prospek membaik, aksi korporasi pro-pemegang saham,
+  penilaian eksternal positif, atau kabar operasional kuat.
+- NEGATIF jika kinerja/prospek memburuk, aksi korporasi merugikan,
+  downgrade/penilaian negatif, masalah hukum/reputasi, atau gangguan operasional serius.
+- NETRAL untuk pengumuman administratif, pro-kontra seimbang, atau dampak sangat ambigu.
+
+Kembalikan HANYA salah satu kata ini: {labels_str}
+
+  Teks berita:
+  \"\"\"{text}\"\"\"
+  """
     return prompt.strip()
 
 
@@ -82,10 +73,6 @@ def _normalize_output(raw: str) -> SentimentLabel:
     up = raw.strip().upper()
 
     # Tangani bentuk dengan spasi / underscore
-    if "SANGAT" in up and "NEGATIF" in up:
-        return "SANGAT_NEGATIF"
-    if "SANGAT" in up and "POSITIF" in up:
-        return "SANGAT_POSITIF"
     if "NEGATIF" in up:
         return "NEGATIF"
     if "POSITIF" in up or "POSITIVE" in up:
@@ -102,18 +89,28 @@ def _normalize_output(raw: str) -> SentimentLabel:
     return "NETRAL"
 
 
+@lru_cache(maxsize=1)
+def _get_client() -> OpenAI:
+    """Lazy instantiate klien OpenAI supaya impor modul tidak gagal tanpa API key."""
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY tidak ditemukan di .env")
+
+    return OpenAI(api_key=api_key, base_url=base_url)
+
+
 def classify_sentiment(text: str) -> SentimentLabel:
-    """
-    Mengembalikan salah satu label:
-    'SANGAT_NEGATIF', 'NEGATIF', 'NETRAL', 'POSITIF', 'SANGAT_POSITIF'.
-    """
+    """Klasifikasi 3-level (NEGATIF/NETRAL/POSITIF) untuk L_text."""
     # Kalau teks kosong → anggap netral saja
     if not isinstance(text, str) or text.strip() == "":
         return "NETRAL"
 
-    # Batasi panjang teks supaya hemat token (mis. 1000 karakter pertama)
-    if len(text) > 2000:
-        text = text[:2000]
+    # Batasi panjang teks supaya hemat token (mis. 2000 karakter pertama)
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
 
     prompt = build_prompt(text)
 
@@ -138,7 +135,7 @@ def classify_sentiment(text: str) -> SentimentLabel:
         kwargs["temperature"] = TEMPERATURE
 
     try:
-        response = client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
+        response = _get_client().chat.completions.create(**kwargs)  # type: ignore[arg-type]
         raw = (response.choices[0].message.content or "").strip()
         return _normalize_output(raw)
     except Exception as e:
