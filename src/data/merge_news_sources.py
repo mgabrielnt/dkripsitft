@@ -8,6 +8,7 @@ DATA_RAW_NEWS_DIR = os.path.join(ROOT_DIR, "data", "raw", "news")
 
 GOOGLE_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_google_rss.csv")
 YAHOO_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_yahoo.csv")
+HTML_ARCHIVE_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_html_archives.csv")
 OUT_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_all_sources.csv")
 
 
@@ -29,6 +30,14 @@ def main():
         dfs.append(df_y)
     else:
         print(f"[WARN] File Yahoo news tidak ditemukan: {YAHOO_PATH}")
+
+    if os.path.exists(HTML_ARCHIVE_PATH):
+        print(f"[INFO] Load HTML archive news dari: {HTML_ARCHIVE_PATH}")
+        df_html = pd.read_csv(HTML_ARCHIVE_PATH, parse_dates=["date"])
+        df_html["source_type"] = "html_archive"
+        dfs.append(df_html)
+    else:
+        print(f"[WARN] File HTML archive tidak ditemukan: {HTML_ARCHIVE_PATH}")
 
     if not dfs:
         print("[ERROR] Tidak ada sumber berita yang ditemukan. Tidak ada file yang digabung.")

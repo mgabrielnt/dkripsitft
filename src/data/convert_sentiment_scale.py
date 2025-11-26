@@ -1,14 +1,8 @@
-"""Konversi skala sentimen 5-level ke 3-level {-1, 0, +1}.
+"""(Deprecated) Konversi skala sentimen 5-level ke 3-level {-1, 0, +1}.
 
-- Input utama: data/processed/news_with_sentiment_per_article.csv
-  berisi kolom `gpt_score` numerik atau label teks.
-- Output: data/interim/news_with_sentiment_3class.csv dengan kolom tambahan:
-  - sentiment_label_3 (-1/0/+1)
-  - pos_count_3, neg_count_3, neu_count_3 (hitungan biner per artikel)
-- File output tidak menimpa data mentah, supaya pipeline tetap reproducible.
-
-CLI:
-    python -m src.data.convert_sentiment_scale
+Pipeline labeling baru sudah berada di `gpt_sentiment_labeling.py` dan
+`aggregate_daily_sentiment.py`. File ini dibiarkan untuk kompatibilitas lama
+namun tidak lagi digunakan di alur utama.
 """
 import os
 from typing import Optional
