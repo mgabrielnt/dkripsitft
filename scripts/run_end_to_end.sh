@@ -6,6 +6,7 @@ set -euo pipefail
 # Semua perintah dijalankan dari root repo.
 
 # 1) Ambil berita
+python -m src.data.scrape_html_archives
 python -m src.data.fetch_news_rss_google
 python -m src.data.fetch_news_yahoo
 python -m src.data.merge_news_sources
