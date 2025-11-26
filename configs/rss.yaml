@@ -3,14 +3,14 @@
 # - https://finance.yahoo.com/
 # - https://www.kompas.com/tag/investasi
 
-# Bahasa default kalau tidak disebut di tiap query
 default_language: "id"
 
 # Berapa tahun ke belakang untuk filter tanggal berita
+# Set 5 tahun supaya masih dapat arsip lama (deep history)
 lookback_years: 5
 
 # Maksimal artikel per query
-max_articles_per_query: 100
+max_articles_per_query: 200
 
 queries:
   # ========== GOOGLE NEWS (BAHASA INDONESIA, UMUM) ==========
@@ -82,10 +82,48 @@ queries:
     rss_url: "https://rss.kontan.co.id/news/keuangan"
     source_name: "Kontan - Keuangan"
 
-  # ========== RSS LANGSUNG: KOMPAS ==========
+  # ========== RSS LANGSUNG: KOMPAS + KUMPARAN ==========
   # Kompas punya RSS general via API Feed Social (banyak topik, termasuk ekonomi/keuangan).
   # Nanti kamu bisa filter sendiri di preprocessing.
   - type: "rss"
     ticker: "IDX"
     rss_url: "https://rss.kompas.com/api/feed/social?apikey=bc58c81819dff4b8d5c53540a2fc7ffd83e6314a"
     source_name: "Kompas.com (general)"
+
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://lapi.kumparan.com/v2.0/rss/"
+    source_name: "Kumparan"
+
+  # ========== RSS LANGSUNG: TEMPO ==========
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "http://rss.tempo.co/nasional"
+    source_name: "Tempo - Nasional"
+
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "http://rss.tempo.co/bisnis"
+    source_name: "Tempo - Bisnis"
+
+  # ========== RSS LANGSUNG: CNN INDONESIA ==========
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://www.cnnindonesia.com/ekonomi/rss"
+    source_name: "CNN Indonesia - Ekonomi"
+
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://www.cnnindonesia.com/nasional/rss"
+    source_name: "CNN Indonesia - Nasional"
+
+  # ========== RSS LANGSUNG: CNBC INDONESIA ==========
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://www.cnbcindonesia.com/news/rss"
+    source_name: "CNBC Indonesia - News"
+
+  - type: "rss"
+    ticker: "IDX"
+    rss_url: "https://www.cnbcindonesia.com/market/rss/"
+    source_name: "CNBC Indonesia - Market"

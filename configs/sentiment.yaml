@@ -1,0 +1,48 @@
+# Konfigurasi multi-sumber sentimen (L_text, L_market, L_lex)
+market:
+  threshold_method: quantile
+  theta_q1: 0.75   # quantile(|AR|) untuk batas signifikan utama
+  theta_q2: 0.9    # quantile(|AR|) untuk sinyal pasar kuat
+  benchmark_column: null  # opsi: kolom return benchmark kalau tersedia di prices_with_indicators
+
+lexicon:
+  positive_words:
+    - profit
+    - laba
+    - kenaikan
+    - naik
+    - menguat
+    - growth
+    - outperform
+    - upgrade
+    - oversubscribed
+    - rekor
+    - ekspansi
+    - kontrak
+    - meningkat
+    - positif
+    - optimistis
+  negative_words:
+    - rugi
+    - loss
+    - turun
+    - penurunan
+    - melemah
+    - default
+    - gagal
+    - skandal
+    - denda
+    - sanksi
+    - fraud
+    - suspensi
+    - pemutusan
+    - pelambatan
+    - negatif
+    - pesimistis
+  threshold_method: quantile
+  tau_q1: 0.7
+  tau_q2: 0.9
+
+text:
+  max_chars: 2000
+  # teks yang dipakai: title + description (lead) + kalimat relevan ke emiten

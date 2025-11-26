@@ -1,8 +1,8 @@
-"""Bangun dataset TFT gabungan harga + indikator teknikal + sentimen 3-class.
+"""Bangun dataset TFT gabungan harga + indikator teknikal + sentimen multi-sumber.
 
-Alir data sentimen:
-1) news_with_sentiment_per_article.csv (processed)
-2) python -m src.data.convert_sentiment_scale -> data/interim/news_with_sentiment_3class.csv
+Alir data sentimen (versi baru):
+1) news_clean.csv (interim)
+2) python -m src.data.gpt_sentiment_labeling -> data/processed/news_with_sentiment_per_article.csv
 3) python -m src.data.aggregate_daily_sentiment -> data/processed/daily_sentiment.csv
 4) File ini merge prices_with_indicators.csv + daily_sentiment.csv -> tft_master.csv
 """
@@ -58,9 +58,15 @@ def main():
 
     # Pastikan kolom sentimen lengkap meski ada pipeline lama
     sentiment_cols = [
+        "sentiment_text_mean",
+        "sentiment_market_mean",
+        "sentiment_lex_mean",
+        "sentiment_final_mean",
+        "sentiment_conf_mean",
+        "sentiment_conf_max",
+        "strong_market_count",
+        "strong_lex_count",
         "sentiment_mean",
-        "sentiment_max",
-        "sentiment_min",
         "sentiment_mean_3d",
         "sentiment_shock",
         "news_count",
