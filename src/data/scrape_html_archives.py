@@ -22,7 +22,7 @@ Kolom minimal: date, ticker, query, query_type, language, title, description, li
 import os
 import re
 from datetime import date, timedelta
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import urljoin
 
 import pandas as pd
@@ -224,25 +224,45 @@ def main() -> None:
         name = src.get("name", f"source_{src_idx}")
         ticker = src.get("ticker", "IDX")
         language = src.get("language", "id")
-        url_template = src.get("url_template")
+        templates: Sequence[str] = src.get("url_templates") or []
 
-        if not url_template:
-            print(f"[WARN] Source '{name}' tidak punya url_template, skip.")
+        # Backward compatibility: single template key
+        if not templates:
+            single = src.get("url_template")
+            if single:
+                templates = [single]
+
+        templates = [t for t in templates if t]
+
+        if not templates:
+            print(f"[WARN] Source '{name}' tidak punya url_template/url_templates, skip.")
             continue
 
         print(f"[INFO] === Source: {name} (ticker={ticker}) ===")
 
         for current_date in daterange_days(today, lookback_years):
             for page in range(1, (max_pages or 1) + 1):
-                url = url_template.format(
-                    year=current_date.year,
-                    month=current_date.month,
-                    day=current_date.day,
-                    page=page,
-                )
-                html = fetch_html(url)
+                html = None
+                last_url = None
+
+                for tmpl_idx, tmpl in enumerate(templates):
+                    url = tmpl.format(
+                        year=current_date.year,
+                        month=current_date.month,
+                        day=current_date.day,
+                        page=page,
+                    )
+                    last_url = url
+                    html = fetch_html(url)
+                    if html:
+                        if tmpl_idx > 0:
+                            print(
+                                f"[INFO] Template ke-{tmpl_idx + 1} dipakai untuk {name}: {url}"
+                            )
+                        break
+
                 if not html:
-                    # kalau page pertama saja gagal, lanjut ke tanggal berikutnya
+                    # kalau semua template gagal, lanjut ke tanggal berikutnya
                     if page == 1:
                         break
                     continue
@@ -258,7 +278,7 @@ def main() -> None:
                     rec.update(
                         {
                             "ticker": ticker,
-                            "query": url,
+                            "query": last_url,
                             "query_type": "html_archive",
                             "language": language,
                             "description": "",

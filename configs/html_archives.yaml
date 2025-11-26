@@ -17,25 +17,35 @@ sources:
   - name: "Tempo - Bisnis"
     ticker: "IDX"
     language: "id"
-    url_template: "https://www.tempo.co/indeks/{year}-{month:02d}-{day:02d}/bisnis?page={page}"
+    # Tempo memakai path dengan "/" per komponen tanggal, bukan tanda minus,
+    # contoh: https://www.tempo.co/indeks/2024/11/26/bisnis?page=1
+    url_templates:
+      - "https://www.tempo.co/indeks/{year}/{month:02d}/{day:02d}/bisnis?page={page}"
+      - "https://www.tempo.co/indeks/{year}-{month:02d}-{day:02d}/bisnis?page={page}"  # fallback
     article_selector: "article a, div.card a, h2 a, h3 a"
     allow_patterns: ["tempo.co"]
     base_url: "https://www.tempo.co"
-    date_from_url_regex: "(\\d{4}/\\d{2}/\\d{2})"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
 
   - name: "Tempo - Nasional"
     ticker: "IDX"
     language: "id"
-    url_template: "https://www.tempo.co/indeks/{year}-{month:02d}-{day:02d}/nasional?page={page}"
+    # Tempo memakai path dengan "/" per komponen tanggal, bukan tanda minus,
+    # contoh: https://www.tempo.co/indeks/2024/11/26/nasional?page=1
+    url_templates:
+      - "https://www.tempo.co/indeks/{year}/{month:02d}/{day:02d}/nasional?page={page}"
+      - "https://www.tempo.co/indeks/{year}-{month:02d}-{day:02d}/nasional?page={page}"  # fallback
     article_selector: "article a, div.card a, h2 a, h3 a"
     allow_patterns: ["tempo.co"]
     base_url: "https://www.tempo.co"
-    date_from_url_regex: "(\\d{4}/\\d{2}/\\d{2})"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
 
   - name: "CNN Indonesia"
     ticker: "IDX"
     language: "id"
-    url_template: "https://www.cnnindonesia.com/indeks/2/{year}/{month:02d}/{day:02d}/{page}"
+    url_templates:
+      - "https://www.cnnindonesia.com/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+      - "https://www.cnnindonesia.com/indeks/{page}?date={year}/{month:02d}/{day:02d}"
     article_selector: "article a, h2 a, h3 a"
     allow_patterns: ["cnnindonesia.com"]
     base_url: "https://www.cnnindonesia.com"
@@ -44,7 +54,10 @@ sources:
   - name: "CNBC Indonesia"
     ticker: "IDX"
     language: "id"
-    url_template: "https://www.cnbcindonesia.com/indeks/news/{year}/{month:02d}/{day:02d}/{page}"
+    url_templates:
+      - "https://www.cnbcindonesia.com/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+      - "https://www.cnbcindonesia.com/market/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+      - "https://www.cnbcindonesia.com/news/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
     article_selector: "article a, h2 a, h3 a"
     allow_patterns: ["cnbcindonesia.com"]
     base_url: "https://www.cnbcindonesia.com"
@@ -53,17 +66,21 @@ sources:
   - name: "Kumparan"
     ticker: "IDX"
     language: "id"
-    url_template: "https://kumparan.com/indeks/{year}/{month:02d}/{day:02d}?page={page}"
+    url_templates:
+      - "https://kumparan.com/indeks/{year}/{month:02d}/{day:02d}?page={page}"
+      - "https://kumparan.com/indeks?date={year}-{month:02d}-{day:02d}&page={page}"
     article_selector: "article a, h2 a, h3 a"
     allow_patterns: ["kumparan.com"]
     base_url: "https://kumparan.com"
-    date_from_url_regex: "(\\d{4}/\\d{2}/\\d{2})"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
 
   - name: "Kompas - Money"
     ticker: "IDX"
     language: "id"
-    url_template: "https://money.kompas.com/search/{year}-{month:02d}-{day:02d}/{page}"
+    url_templates:
+      - "https://indeks.kompas.com/?site=money&date={year}-{month:02d}-{day:02d}&page={page}"
+      - "https://money.kompas.com/search/{year}-{month:02d}-{day:02d}/{page}"
     article_selector: "article a, h2 a, h3 a"
     allow_patterns: ["kompas.com"]
     base_url: "https://money.kompas.com"
-    date_from_url_regex: "(\\d{4}/\\d{2}/\\d{2})"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
