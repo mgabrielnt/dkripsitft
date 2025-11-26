@@ -64,6 +64,14 @@ def main():
     after = len(df)
     print(f"[INFO] Drop berita dengan teks kosong: {before} -> {after}")
 
+    # deduplikasi berbasis link dan konten title_clean per ticker + tanggal
+    before = len(df)
+    subset_cols = [c for c in ["link", "ticker", "date", "title_clean"] if c in df.columns]
+    if subset_cols:
+        df = df.drop_duplicates(subset=subset_cols)
+    df = df.drop_duplicates()
+    print(f"[INFO] Drop duplikat (link/title) : {before} -> {len(df)}")
+
     # pilih kolom penting untuk labeling
     keep_cols = [
         "date",

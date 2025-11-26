@@ -1,24 +1,20 @@
 model_name: "gpt-5-nano"
-task: "sentiment_classification_5level"
+task: "sentiment_classification_3level"
 
-# 5 level sentimen, fokus ke jangka sangat pendek (1–5 hari)
+# 3 kelas polaritas baru untuk L_text
 labels:
-  - SANGAT_NEGATIF
   - NEGATIF
   - NETRAL
   - POSITIF
-  - SANGAT_POSITIF
 
-# Mapping ke skor numerik (lebih kaya daripada -1/0/+1)
+# Mapping ke skor numerik {-1, 0, +1}
 score_mapping:
-  SANGAT_NEGATIF: -2
   NEGATIF: -1
   NETRAL: 0
   POSITIF: 1
-  SANGAT_POSITIF: 2
 
 # Untuk chat.completions → pakai max_completion_tokens
-max_completion_tokens: 5
+max_completion_tokens: 8
 
 # Untuk gpt-5-nano, temperature SELALU 1.
 # Di gpt_client.py nanti param ini diabaikan untuk gpt-5-nano.

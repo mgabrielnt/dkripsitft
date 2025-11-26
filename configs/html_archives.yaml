@@ -1,0 +1,86 @@
+# Konfigurasi scraping HTML untuk arsip lama (non-RSS)
+# Tujuan: dapatkan berita beberapa tahun ke belakang dari indeks harian situs.
+# Struktur umum per sumber:
+# - name           : nama sumber
+# - ticker         : ticker default (untuk berita umum pakai "IDX")
+# - url_template   : URL dengan placeholder {year} {month} {day} {page}
+# - article_selector: CSS selector anchor artikel (fallback: semua <a>)
+# - allow_patterns : daftar substring/regex sederhana untuk memfilter link yang valid
+# - base_url       : untuk menyambung link relatif
+# - language       : kode bahasa (default: id)
+# - max_pages      : maksimum halaman per tanggal
+# - date_from_url_regex: regex untuk ekstraksi tanggal dari URL (opsional)
+# - tags_to_strip  : CSS selector yang di-drop sebelum parsing (opsional, misal script/style)
+lookback_years: 5
+max_pages: 2
+sources:
+  - name: "Tempo - Bisnis"
+    ticker: "IDX"
+    language: "id"
+    # Tempo memakai path dengan "/" per komponen tanggal, bukan tanda minus,
+    # contoh: https://www.tempo.co/indeks/2024/11/26/bisnis?page=1
+    url_templates:
+      - "https://www.tempo.co/indeks/{year}/{month:02d}/{day:02d}/bisnis?page={page}"
+      - "https://www.tempo.co/indeks/{year}-{month:02d}-{day:02d}/bisnis?page={page}"  # fallback
+    article_selector: "article a, div.card a, h2 a, h3 a"
+    allow_patterns: ["tempo.co"]
+    base_url: "https://www.tempo.co"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
+
+  - name: "Tempo - Nasional"
+    ticker: "IDX"
+    language: "id"
+    # Tempo memakai path dengan "/" per komponen tanggal, bukan tanda minus,
+    # contoh: https://www.tempo.co/indeks/2024/11/26/nasional?page=1
+    url_templates:
+      - "https://www.tempo.co/indeks/{year}/{month:02d}/{day:02d}/nasional?page={page}"
+      - "https://www.tempo.co/indeks/{year}-{month:02d}-{day:02d}/nasional?page={page}"  # fallback
+    article_selector: "article a, div.card a, h2 a, h3 a"
+    allow_patterns: ["tempo.co"]
+    base_url: "https://www.tempo.co"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
+
+  - name: "CNN Indonesia"
+    ticker: "IDX"
+    language: "id"
+    url_templates:
+      - "https://www.cnnindonesia.com/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+      - "https://www.cnnindonesia.com/indeks/{page}?date={year}/{month:02d}/{day:02d}"
+    article_selector: "article a, h2 a, h3 a"
+    allow_patterns: ["cnnindonesia.com"]
+    base_url: "https://www.cnnindonesia.com"
+    date_from_url_regex: "(\\d{4}/\\d{2}/\\d{2})"
+
+  - name: "CNBC Indonesia"
+    ticker: "IDX"
+    language: "id"
+    url_templates:
+      - "https://www.cnbcindonesia.com/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+      - "https://www.cnbcindonesia.com/market/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+      - "https://www.cnbcindonesia.com/news/indeks?date={year}/{month:02d}/{day:02d}&page={page}"
+    article_selector: "article a, h2 a, h3 a"
+    allow_patterns: ["cnbcindonesia.com"]
+    base_url: "https://www.cnbcindonesia.com"
+    date_from_url_regex: "(\\d{4}/\\d{2}/\\d{2})"
+
+  - name: "Kumparan"
+    ticker: "IDX"
+    language: "id"
+    url_templates:
+      - "https://kumparan.com/indeks/{year}/{month:02d}/{day:02d}?page={page}"
+      - "https://kumparan.com/indeks?date={year}-{month:02d}-{day:02d}&page={page}"
+    article_selector: "article a, h2 a, h3 a"
+    allow_patterns: ["kumparan.com"]
+    base_url: "https://kumparan.com"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
+
+  - name: "Kompas - Money"
+    ticker: "IDX"
+    language: "id"
+    url_templates:
+      - "https://indeks.kompas.com/?site=money&date={year}-{month:02d}-{day:02d}&page={page}"
+      - "https://money.kompas.com/search/{year}-{month:02d}-{day:02d}/{page}"
+    article_selector: "article a, h2 a, h3 a"
+    allow_patterns: ["kompas.com"]
+    base_url: "https://money.kompas.com"
+    date_from_url_regex: "(\\d{4}[/-]\\d{2}[/-]\\d{2})"
