@@ -27,7 +27,10 @@ python -m src.data.build_tft_master_dataset
 # 5) Training TFT baseline & hybrid
 python -m src.models.train_tft_baseline
 python -m src.models.train_tft_with_sentiment
+python -m src.utils.update_experiments_best_ckpt
 
 # 6) Evaluasi & backtest sederhana
 python -m src.models.evaluate_tft_models
+python -m src.analysis.evaluate_tft_diagnostics
 python -m src.models.evaluate_tft_backtest
+python -m src.analysis.compute_vif_features

@@ -1,9 +1,11 @@
-"""Trainer TFT HYBRID dengan fitur sentimen 3-class.
+"""
+Trainer TFT HYBRID dengan fitur sentimen.
 
-Fitur sentimen default mengikuti varian HYBRID_v3:
+Fitur sentimen default mengikuti varian HYBRID_v3/v4:
 - v1: sentiment_mean, news_count, sentiment_mean_3d, news_count_3d, has_news
 - v2: v1 + pos_count, neg_count, neu_count
-- v3: v2 + sentiment_shock, extreme_news (default)
+- v3: v2 + sentiment_shock, extreme_news
+- v4: v3 + sentiment_vol_7d, sentiment_trend_5d  (lebih dinamis)
 
 Urutan CLI yang disarankan:
 1) python -m src.data.convert_sentiment_scale
@@ -45,7 +47,6 @@ def load_yaml(path: str):
 
 def bucketize_sentiment(df: pd.DataFrame, threshold: float = 0.0) -> pd.DataFrame:
     """Konversi sentimen kontinu menjadi {-1, 0, 1} untuk eksperimen sign-only."""
-
     df = df.copy()
     for col in ["sentiment_mean", "sentiment_mean_3d"]:
         if col not in df.columns:
@@ -65,7 +66,6 @@ def drop_constant_sentiment_features(
     df_train: pd.DataFrame, features: list, eps: float = 1e-9
 ) -> tuple[list, list]:
     """Buang fitur sentimen yang konstan agar tidak mengganggu training."""
-
     kept, dropped = [], []
     for col in features:
         if col not in df_train.columns:
@@ -88,7 +88,6 @@ def clip_sentiment_outliers(
     quantile: float = 0.995,
 ) -> tuple[pd.DataFrame, dict]:
     """Clipping outlier sentimen (mis. lonjakan news_count) berbasis train quantile."""
-
     caps = {}
     quantile = max(min(quantile, 0.999), 0.5)  # jaga rentang aman
 
@@ -136,8 +135,8 @@ def main():
     loss_name = str(model_cfg.get("loss", "mae")).lower()
 
     # Hyperparameter khusus hybrid
-    hidden_size = model_cfg.get("hidden_size_hybrid", model_cfg.get("hidden_size", 32))
-    dropout = model_cfg.get("dropout_hybrid", model_cfg.get("dropout", 0.1))
+    hidden_size = model_cfg.get("hidden_size_hybrid", model_cfg.get("hidden_size", 64))
+    dropout = model_cfg.get("dropout_hybrid", model_cfg.get("dropout", 0.15))
 
     sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
     sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
@@ -172,6 +171,12 @@ def main():
         "log_return_1d",
         "vol_20",
         "ma_5_div_ma_20",
+        "bb_width_20",
+        "volume_ma_ratio_20",
+        "close_lag_2",
+        "close_lag_3",
+        "return_mean_5d",
+        "return_std_5d",
     ]
 
     sentiment_feature_sets = {
@@ -204,13 +209,31 @@ def main():
             "sentiment_shock",
             "extreme_news",
         ],
+        "v4": [
+            "sentiment_mean",
+            "news_count",
+            "sentiment_mean_3d",
+            "news_count_3d",
+            "has_news",
+            "pos_count",
+            "neg_count",
+            "neu_count",
+            "sentiment_shock",
+            "extreme_news",
+            "sentiment_vol_7d",
+            "sentiment_trend_5d",
+        ],
     }
 
     sentiment_reals = sentiment_feature_sets.get(
         sentiment_feature_set, sentiment_feature_sets["v3"]
     )
     if sentiment_feature_set not in sentiment_feature_sets:
-        print(f"[WARN] sentiment_feature_set={sentiment_feature_set} tidak dikenal, pakai v3")
+        print(
+            f"[WARN] sentiment_feature_set={sentiment_feature_set} tidak dikenal, pakai v3"
+        )
+    else:
+        print(f"[INFO] Menggunakan sentiment_feature_set={sentiment_feature_set}")
 
     static_categoricals = ["ticker"]
     static_reals = []  # close_center/scale otomatis dari GroupNormalizer
@@ -235,14 +258,21 @@ def main():
         + sentiment_reals
         + ["split"]
     )
+    required_cols = list(dict.fromkeys(required_cols))
     missing_cols = [c for c in required_cols if c not in df.columns]
     if missing_cols:
         raise ValueError(f"Kolom wajib hilang di tft_master: {missing_cols}")
 
-    # Bersihkan NaN di kolom yang dipakai TFT HYBRID
+    # Bersihkan NaN di fitur teknikal + sentimen
     for col in technical_reals + sentiment_reals:
         if col in df.columns:
-            df[col] = df[col].fillna(0)
+            df[col] = df[col].fillna(0.0)
+
+    # Optional: clipping outlier sentimen
+    df_train = df[df["split"] == "train"].copy()
+    df, caps = clip_sentiment_outliers(df_train, df, sentiment_reals, quantile=0.995)
+    if caps:
+        print(f"[INFO] Clipping sentimen dengan caps (0.5–99.5%): {caps}")
 
     df_train = df[df["split"] == "train"].copy()
     df_val = df[df["split"] == "val"].copy()
@@ -281,7 +311,9 @@ def main():
         stop_randomization=True,
     )
 
-    print(f"[INFO] Len training dataset: {len(training)}, len validation: {len(validation)}")
+    print(
+        f"[INFO] Len training dataset: {len(training)}, len validation: {len(validation)}"
+    )
 
     # ====== DataLoader ======
     train_dataloader = training.to_dataloader(
@@ -316,7 +348,7 @@ def main():
         lstm_layers=model_cfg.get("lstm_layers", 2),
         dropout=dropout,
         attention_head_size=model_cfg.get("attention_head_size", 4),
-        hidden_continuous_size=model_cfg.get("hidden_continuous_size", 16),
+        hidden_continuous_size=model_cfg.get("hidden_continuous_size", 32),
         loss=loss,
         output_size=output_size,
         log_interval=10,
@@ -332,7 +364,7 @@ def main():
     lr_logger = LearningRateMonitor(logging_interval="epoch")
     early_stop_callback = EarlyStopping(
         monitor="val_loss",
-        patience=5,
+        patience=model_cfg.get("early_stopping_patience", 5),
         mode="min",
     )
     checkpoint_callback = ModelCheckpoint(

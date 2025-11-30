@@ -14,7 +14,11 @@ OUT_PATH = os.path.join(DATA_INTERIM_DIR, "prices_with_indicators.csv")
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Hitung RSI sederhana."""
+    """
+    Hitung RSI sederhana.
+
+    Dipakai untuk menghasilkan fitur rsi_14 yang lulus seleksi VIF.
+    """
     delta = series.diff()
 
     gain = np.where(delta > 0, delta, 0)
@@ -64,6 +68,20 @@ def clean_raw_prices(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tambahkan hanya indikator teknikal yang DIPAKAI di model akhir
+    (berdasarkan hasil VIF):
+
+    - close
+    - volume
+    - log_return_1d
+    - vol_20        (std log_return_1d 20 hari)
+    - rsi_14
+    - ma_5_div_ma_20
+
+    Indikator lain (MACD, Bollinger, RSI63, ROC, MOM, MA panjang, dll)
+    SENGAJA tidak dihitung untuk menghindari fitur berlebih / multikolinear.
+    """
     # Pastikan urut per ticker & tanggal
     df = df.sort_values(["ticker", "date"]).copy()
 
@@ -78,73 +96,58 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     }
     df.rename(columns=rename_map, inplace=True)
 
-    result_list = []
+    result_list: list[pd.DataFrame] = []
 
     for ticker, g in df.groupby("ticker"):
         g = g.sort_values("date").copy()
 
-        # ========== MOVING AVERAGE (SMA) ==========
+        # ========== MOVING AVERAGE (hanya yang perlu untuk rasio) ==========
+        # MA5 & MA20 cuma dipakai sebagai intermediate untuk ma_5_div_ma_20
         g["ma_5"] = g["close"].rolling(window=5, min_periods=5).mean()
-        g["ma_10"] = g["close"].rolling(window=10, min_periods=10).mean()
         g["ma_20"] = g["close"].rolling(window=20, min_periods=20).mean()
-        # MA252 (kurang lebih 1 tahun perdagangan)
-        g["ma_252"] = g["close"].rolling(window=252, min_periods=252).mean()
+        g["ma_5_div_ma_20"] = g["ma_5"] / g["ma_20"]
 
-        # ========== EMA ==========
-        g["ema_21"] = g["close"].ewm(span=21, min_periods=21, adjust=False).mean()
-        # EMA untuk MACD (standar: 12 & 26)
-        g["ema_12"] = g["close"].ewm(span=12, min_periods=12, adjust=False).mean()
-        g["ema_26"] = g["close"].ewm(span=26, min_periods=26, adjust=False).mean()
-
-        # ========== RSI ==========
+        # ========== RSI 14 (sesuai fitur VIF) ==========
         g["rsi_14"] = compute_rsi(g["close"], period=14)
-        g["rsi_63"] = compute_rsi(g["close"], period=63)  # RSI63
 
-        # ========== RETURN, ROC, MOMENTUM ==========
-        # log return harian (sudah kamu pakai)
+        # ========== LOG RETURN & VOLATILITAS ==========
+        # log return harian
         g["log_return_1d"] = np.log(g["close"] / g["close"].shift(1))
-
-        # ROC63: persen perubahan 63 hari
-        g["roc_63"] = g["close"].pct_change(periods=63)
-
-        # MOM63: momentum = selisih harga
-        g["mom_63"] = g["close"] - g["close"].shift(63)
 
         # Volatilitas 20 hari (std log_return_1d)
         g["vol_20"] = g["log_return_1d"].rolling(window=20, min_periods=20).std()
 
-        # Rasio MA: MA5 / MA20 (ini yang kita pakai, bukan ma_5 & ma_20 mentah)
-        g["ma_5_div_ma_20"] = g["ma_5"] / g["ma_20"]
-
-        # ========== MACD ==========
-        g["macd"] = g["ema_12"] - g["ema_26"]
-        g["macd_signal"] = g["macd"].ewm(span=9, min_periods=9, adjust=False).mean()
-        g["macd_hist"] = g["macd"] - g["macd_signal"]
-
-        # ========== BOLLINGER BANDS (20 hari, 2*std) ==========
-        rolling_std_20 = g["close"].rolling(window=20, min_periods=20).std()
-        g["bb_middle_20"] = g["ma_20"]                      # middle band = SMA20
-        g["bb_upper_20"] = g["ma_20"] + 2 * rolling_std_20  # upper band
-        g["bb_lower_20"] = g["ma_20"] - 2 * rolling_std_20  # lower band
-
+        # Simpan group
         result_list.append(g)
 
     df_ind = pd.concat(result_list, ignore_index=True)
 
-    # 🔥 HAPUS fitur yang sangat kolinear / tidak dipakai sebagai input TFT:
-    # - open, high, low: sangat kolinear dengan close
-    # - ma_5, ma_10, ma_20: sangat kolinear dengan close + satu sama lain
+    # Buang kolom intermediate & kolom harga yang tidak dipakai di model
     drop_cols = [
         "open",
         "high",
         "low",
+        "adj_close",
         "ma_5",
-        "ma_10",
         "ma_20",
-        # opsional kalau tidak dipakai sama sekali:
-        # "adj_close",
     ]
     df_ind = df_ind.drop(columns=[c for c in drop_cols if c in df_ind.columns])
+
+    # Susun ulang kolom: identitas + fitur yang dipakai
+    # (kolom lain di-drop supaya konsisten dengan desain fitur final)
+    keep_cols = [
+        "ticker",
+        "date",
+        "close",
+        "volume",
+        "log_return_1d",
+        "vol_20",
+        "rsi_14",
+        "ma_5_div_ma_20",
+    ]
+    # Pastikan hanya kolom yang ada
+    keep_cols = [c for c in keep_cols if c in df_ind.columns]
+    df_ind = df_ind[keep_cols]
 
     return df_ind
 
@@ -160,8 +163,11 @@ def main():
     # 🔧 BERSIHKAN data mentah (buang baris aneh, gabung kolom *.1, ubah ke numerik)
     df_clean = clean_raw_prices(df_raw)
 
-    # Tambah indikator teknikal
+    # Tambah indikator teknikal yang sudah diseleksi via VIF
     df_ind = add_technical_indicators(df_clean)
+
+    print("[INFO] Kolom yang disimpan di prices_with_indicators.csv:")
+    print(df_ind.columns.tolist())
 
     print(f"[INFO] Saving prices with indicators to {OUT_PATH}")
     df_ind.to_csv(OUT_PATH, index=False)

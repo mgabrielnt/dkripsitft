@@ -35,6 +35,7 @@ def main():
     data_cfg = load_yaml(CONFIG_DATA_PATH)
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
 
+    # target bisa "close" atau, nanti, "log_return_1d"
     target = model_cfg.get("target", "close")
 
     max_encoder_length = model_cfg.get("max_encoder_length", 60)
@@ -68,22 +69,38 @@ def main():
     df["time_idx"] = df["time_idx"].astype("int64")
     df["ticker"] = df["ticker"].astype("category")
 
-    # ====== Bersihkan NaN di kolom yang dipakai TFT baseline ======
-    # hanya fitur dengan VIF yang sehat + target
+    # ====== Definisi fitur teknikal baseline ======
+    technical_reals = [
+        "close",
+        "volume",
+        "rsi_14",
+        "log_return_1d",
+        "vol_20",
+        "ma_5_div_ma_20",
+        "bb_width_20",
+        "volume_ma_ratio_20",
+        "close_lag_2",
+        "close_lag_3",
+        "return_mean_5d",
+        "return_std_5d",
+    ]
+
+    # ====== Validasi & cleaning NaN ======
     required_cols = [
         "time_idx",
         "ticker",
         "day_of_week",
         "month",
         "is_month_end",
-        "close",            # target + lagged input
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
+        target,   # target bisa bukan "close"
         "split",
-    ]
+    ] + technical_reals
+
+    # buang duplikat kalau ada
+    required_cols = list(dict.fromkeys(required_cols))
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Kolom wajib hilang di tft_master.csv: {missing}")
 
     print("\n[INFO] NaN per kolom (sebelum cleaning):")
     print(df[required_cols].isna().sum())
@@ -113,15 +130,8 @@ def main():
     ]
     time_varying_known_categoricals = []
 
-    # Observed unknown reals – fitur dengan VIF sehat
-    time_varying_unknown_reals = [
-        "close",
-        "volume",
-        "rsi_14",
-        "log_return_1d",
-        "vol_20",
-        "ma_5_div_ma_20",
-    ]
+    # Observed unknown reals – fitur harga + teknikal
+    time_varying_unknown_reals = technical_reals
     time_varying_unknown_categoricals = []
 
     # ====== Buat TimeSeriesDataSet untuk TRAIN ======
@@ -155,7 +165,9 @@ def main():
         stop_randomization=True,
     )
 
-    print(f"[INFO] Len training dataset: {len(training)}, len validation: {len(validation)}")
+    print(
+        f"[INFO] Len training dataset: {len(training)}, len validation: {len(validation)}"
+    )
 
     # ====== DataLoader ======
     train_dataloader = training.to_dataloader(
@@ -186,11 +198,11 @@ def main():
     tft = TemporalFusionTransformer.from_dataset(
         training,
         learning_rate=learning_rate,
-        hidden_size=model_cfg.get("hidden_size", 32),
+        hidden_size=model_cfg.get("hidden_size", 64),
         lstm_layers=model_cfg.get("lstm_layers", 2),
         dropout=model_cfg.get("dropout", 0.1),
         attention_head_size=model_cfg.get("attention_head_size", 4),
-        hidden_continuous_size=model_cfg.get("hidden_continuous_size", 16),
+        hidden_continuous_size=model_cfg.get("hidden_continuous_size", 32),
         loss=loss,
         output_size=output_size,
         log_interval=10,
@@ -206,7 +218,7 @@ def main():
     lr_logger = LearningRateMonitor(logging_interval="epoch")
     early_stop_callback = EarlyStopping(
         monitor="val_loss",
-        patience=5,
+        patience=model_cfg.get("early_stopping_patience", 5),
         mode="min",
     )
     checkpoint_callback = ModelCheckpoint(

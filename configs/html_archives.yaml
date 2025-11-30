@@ -15,6 +15,7 @@ lookback_years: 5
 max_pages: 2
 sources:
   - name: "Tempo - Bisnis"
+    enabled: false
     ticker: "IDX"
     language: "id"
     # Tempo memakai path dengan "/" per komponen tanggal, bukan tanda minus,
