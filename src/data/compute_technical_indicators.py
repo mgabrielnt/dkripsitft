@@ -1,4 +1,6 @@
 import os
+from typing import List
+
 import numpy as np
 import pandas as pd
 
@@ -13,6 +15,9 @@ RAW_MERGED_PATH = os.path.join(DATA_RAW_PRICES_DIR, "prices_all_raw.csv")
 OUT_PATH = os.path.join(DATA_INTERIM_DIR, "prices_with_indicators.csv")
 
 
+# ============================================================
+# HELPER: RSI
+# ============================================================
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
     Hitung RSI sederhana.
@@ -36,51 +41,104 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi
 
 
+# ============================================================
+# BERSIHKAN RAW PRICES
+# ============================================================
 def clean_raw_prices(df: pd.DataFrame) -> pd.DataFrame:
     """
     Bersihkan prices_all_raw.csv supaya:
-    - baris header duplikat hilang
-    - kolom *.1 (BBRI) digabung ke kolom utama
-    - kolom harga & volume jadi numerik
+    - buang baris header aneh (date NaN)
+    - kalau format WIDE (Open, Open.1, Open.2, ...), semua digabung jadi 1 kolom:
+        Open, High, Low, Close, Adj Close, Volume
+      sehingga setiap baris hanya punya 1 set OHLCV sesuai 'ticker'-nya
+    - kalau format sudah LONG (tanpa .1/.2/.3), tetap aman
+    - pastikan tipe data numerik & date = datetime
     """
-    # 1) Buang baris yang tanggalnya kosong (itu baris 'BBCA.JK, BBRI.JK, ...')
+    if "date" not in df.columns:
+        raise KeyError(
+            "Kolom 'date' tidak ditemukan di prices_all_raw.csv. "
+            "Pastikan download_prices_yahoo.py menyimpan kolom 'date'."
+        )
+
+    # 1) Buang baris yang tanggalnya kosong (biasanya baris header ticker)
     df = df[df["date"].notna()].copy()
-
-    # 2) Gabungkan kolom Close.1 → Close, High.1 → High, dst (kalau ada)
-    base_cols = ["Close", "High", "Low", "Open", "Volume"]
-    for col in base_cols:
-        other = col + ".1"
-        if other in df.columns:
-            # kalau kolom utama NaN (misal baris BBRI), isi dengan nilai dari kolom .1
-            df[col] = df[col].fillna(df[other])
-
-    # 3) Hapus kolom *.1 yang sudah tidak dipakai
-    df = df.drop(columns=[c for c in df.columns if c.endswith(".1")])
-
-    # 4) Pastikan kolom harga & volume benar-benar numerik (float)
-    for col in base_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # 5) Pastikan kolom tanggal bertipe datetime
     df["date"] = pd.to_datetime(df["date"])
+
+    # 2) Definisi kolom harga/volume dasar
+    base_cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+
+    # Cek apakah ada format WIDE (kolom dengan suffix .1, .2, ...)
+    has_wide = any(
+        any(col.startswith(base + ".") for base in base_cols)
+        for col in df.columns
+    )
+
+    if not has_wide:
+        # Format sudah long: cukup pastikan numerik
+        for col in base_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+
+    # 3) Format WIDE → gabungkan semua suffix .1 s/d .5 ke kolom utama
+    suffixes = ["", ".1", ".2", ".3", ".4", ".5"]
+
+    for col in base_cols:
+        # mulai dengan semua NaN
+        base_series = pd.Series(np.nan, index=df.index)
+
+        # urutan prioritas: kolom tanpa suffix → .1 → .2 → ...
+        for suf in suffixes:
+            col_name = col if suf == "" else col + suf
+            if col_name in df.columns:
+                base_series = base_series.where(~base_series.isna(), df[col_name])
+
+        # konversi ke numerik
+        df[col] = pd.to_numeric(base_series, errors="coerce")
+
+    # 4) Hapus semua kolom *.1, *.2, ... yang sudah tidak dipakai
+    drop_cols = []
+    for c in df.columns:
+        for base in base_cols:
+            if c.startswith(base + "."):
+                drop_cols.append(c)
+                break
+
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
 
     return df
 
 
+# ============================================================
+# HITUNG INDIKATOR TEKNIKAL TERPILIH (+ FITUR TAMBAHAN)
+# ============================================================
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Tambahkan hanya indikator teknikal yang DIPAKAI di model akhir
-    (berdasarkan hasil VIF):
+    Tambahkan indikator teknikal yang DIPAKAI di model akhir
+    (berdasarkan hasil VIF & analisis korelasi) + beberapa fitur tambahan
+    yang berpotensi membantu model TFT.
 
+    ***Fitur utama:***
     - close
     - volume
     - log_return_1d
-    - vol_20        (std log_return_1d 20 hari)
+    - vol_20                 (std log_return_1d 20 hari)
     - rsi_14
     - ma_5_div_ma_20
+    - bb_width_20
+    - volume_ma_ratio_20
+    - close_lag_2
+    - close_lag_3
+    - return_mean_5d
+    - return_std_5d
 
-    Indikator lain (MACD, Bollinger, RSI63, ROC, MOM, MA panjang, dll)
-    SENGAJA tidak dihitung untuk menghindari fitur berlebih / multikolinear.
+    ***Fitur tambahan yang mungkin berguna:***
+    - intraday_range_pct     : (high - low) / close
+    - atr_14                 : average true range 14 hari
+    - gap_return_1d          : log(open / close_prev)
+    - price_zscore_20        : (close - ma_20) / std(close, 20)
+    - volume_zscore_20       : (volume - volume_ma_20) / std(volume, 20)
     """
     # Pastikan urut per ticker & tanggal
     df = df.sort_values(["ticker", "date"]).copy()
@@ -96,33 +154,100 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     }
     df.rename(columns=rename_map, inplace=True)
 
-    result_list: list[pd.DataFrame] = []
+    if "ticker" not in df.columns:
+        raise KeyError(
+            "Kolom 'ticker' tidak ditemukan. Pastikan download_prices_yahoo.py "
+            "menambahkan kolom 'ticker' sebelum disimpan."
+        )
+
+    result_list: List[pd.DataFrame] = []
+    eps = 1e-8
 
     for ticker, g in df.groupby("ticker"):
         g = g.sort_values("date").copy()
 
-        # ========== MOVING AVERAGE (hanya yang perlu untuk rasio) ==========
-        # MA5 & MA20 cuma dipakai sebagai intermediate untuk ma_5_div_ma_20
+        # ==============================
+        # 0) Prev close untuk beberapa indikator
+        # ==============================
+        prev_close = g["close"].shift(1)
+
+        # ==============================
+        # 1) Moving Average harga (MA5, MA20)
+        # ==============================
         g["ma_5"] = g["close"].rolling(window=5, min_periods=5).mean()
         g["ma_20"] = g["close"].rolling(window=20, min_periods=20).mean()
         g["ma_5_div_ma_20"] = g["ma_5"] / g["ma_20"]
 
-        # ========== RSI 14 (sesuai fitur VIF) ==========
+        # ==============================
+        # 2) RSI 14
+        # ==============================
         g["rsi_14"] = compute_rsi(g["close"], period=14)
 
-        # ========== LOG RETURN & VOLATILITAS ==========
-        # log return harian
-        g["log_return_1d"] = np.log(g["close"] / g["close"].shift(1))
-
-        # Volatilitas 20 hari (std log_return_1d)
+        # ==============================
+        # 3) Log return harian + volatilitas 20 hari
+        # ==============================
+        g["log_return_1d"] = np.log(g["close"] / prev_close)
         g["vol_20"] = g["log_return_1d"].rolling(window=20, min_periods=20).std()
 
-        # Simpan group
+        # ==============================
+        # 4) Bollinger Band width 20 hari
+        #    middle = MA20, upper/lower = MA20 ± 2*std(close, 20)
+        # ==============================
+        close_std_20 = g["close"].rolling(window=20, min_periods=20).std()
+        g["bb_upper_20"] = g["ma_20"] + 2 * close_std_20
+        g["bb_lower_20"] = g["ma_20"] - 2 * close_std_20
+        g["bb_width_20"] = (g["bb_upper_20"] - g["bb_lower_20"]) / (g["ma_20"] + eps)
+
+        # *** Tambahan: price_zscore_20 ***
+        g["price_zscore_20"] = (g["close"] - g["ma_20"]) / (close_std_20 + eps)
+
+        # ==============================
+        # 5) Volume MA ratio 20 hari + z-score volume
+        # ==============================
+        g["volume_ma_20"] = g["volume"].rolling(window=20, min_periods=5).mean()
+        g["volume_ma_ratio_20"] = g["volume"] / (g["volume_ma_20"] + eps)
+
+        volume_std_20 = g["volume"].rolling(window=20, min_periods=5).std()
+        g["volume_zscore_20"] = (g["volume"] - g["volume_ma_20"]) / (volume_std_20 + eps)
+
+        # ==============================
+        # 6) Lagged close (1, 2 & 3 hari)
+        # ==============================
+        g["close_lag_1"] = prev_close
+        g["close_lag_2"] = g["close"].shift(2)
+        g["close_lag_3"] = g["close"].shift(3)
+
+        # ==============================
+        # 7) Return window 5 hari: mean & std
+        # ==============================
+        g["return_mean_5d"] = g["log_return_1d"].rolling(window=5, min_periods=3).mean()
+        g["return_std_5d"] = g["log_return_1d"].rolling(window=5, min_periods=3).std()
+
+        # ==============================
+        # 8) Intraday range & ATR 14 (true range)
+        # ==============================
+        # intraday range (% dari close)
+        g["intraday_range_pct"] = (g["high"] - g["low"]) / (g["close"] + eps)
+
+        # True Range
+        tr1 = g["high"] - g["low"]
+        tr2 = (g["high"] - prev_close).abs()
+        tr3 = (g["low"] - prev_close).abs()
+        g["true_range"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # ATR 14 (pakai simple rolling mean)
+        g["atr_14"] = g["true_range"].rolling(window=14, min_periods=5).mean()
+
+        # ==============================
+        # 9) Gap return (overnight gap)
+        # ==============================
+        g["gap_return_1d"] = np.log(g["open"] / (prev_close + eps))
+
         result_list.append(g)
 
     df_ind = pd.concat(result_list, ignore_index=True)
 
-    # Buang kolom intermediate & kolom harga yang tidak dipakai di model
+    # Buang kolom intermediate yang tidak diperlukan oleh model
     drop_cols = [
         "open",
         "high",
@@ -130,28 +255,52 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
         "adj_close",
         "ma_5",
         "ma_20",
+        "bb_upper_20",
+        "bb_lower_20",
+        "volume_ma_20",
+        "true_range",
+        "close_lag_1",
     ]
     df_ind = df_ind.drop(columns=[c for c in drop_cols if c in df_ind.columns])
 
     # Susun ulang kolom: identitas + fitur yang dipakai
-    # (kolom lain di-drop supaya konsisten dengan desain fitur final)
     keep_cols = [
         "ticker",
         "date",
+        # harga & volume dasar
         "close",
         "volume",
+        # return & volatilitas
         "log_return_1d",
         "vol_20",
+        "return_mean_5d",
+        "return_std_5d",
+        # indikator tren / level
         "rsi_14",
         "ma_5_div_ma_20",
+        "bb_width_20",
+        "price_zscore_20",
+        # indikator volume
+        "volume_ma_ratio_20",
+        "volume_zscore_20",
+        # lag harga
+        "close_lag_2",
+        "close_lag_3",
+        # fitur volatilitas & range tambahan
+        "intraday_range_pct",
+        "atr_14",
+        "gap_return_1d",
     ]
-    # Pastikan hanya kolom yang ada
     keep_cols = [c for c in keep_cols if c in df_ind.columns]
+
     df_ind = df_ind[keep_cols]
 
     return df_ind
 
 
+# ============================================================
+# MAIN
+# ============================================================
 def main():
     if not os.path.exists(RAW_MERGED_PATH):
         raise FileNotFoundError(f"File harga gabungan tidak ditemukan: {RAW_MERGED_PATH}")
@@ -160,16 +309,20 @@ def main():
     # Baca mentah dulu (tanpa parse_dates, akan di-handle di clean_raw_prices)
     df_raw = pd.read_csv(RAW_MERGED_PATH)
 
-    # 🔧 BERSIHKAN data mentah (buang baris aneh, gabung kolom *.1, ubah ke numerik)
+    # 🔧 BERSIHKAN data mentah (buang baris aneh, gabung kolom *.1/.2/... → satu kolom)
     df_clean = clean_raw_prices(df_raw)
 
-    # Tambah indikator teknikal yang sudah diseleksi via VIF
+    # Tambah indikator teknikal yang sudah diseleksi via VIF & analisis korelasi
+    # + beberapa fitur tambahan yang berpotensi membantu TFT
     df_ind = add_technical_indicators(df_clean)
 
     print("[INFO] Kolom yang disimpan di prices_with_indicators.csv:")
     print(df_ind.columns.tolist())
 
-    print(f"[INFO] Saving prices with indicators to {OUT_PATH}")
+    print("\n[INFO] Jumlah NaN per kolom (setelah hitung indikator):")
+    print(df_ind.isna().sum())
+
+    print(f"\n[INFO] Saving prices with indicators to {OUT_PATH}")
     df_ind.to_csv(OUT_PATH, index=False)
     print("[INFO] Done.")
 

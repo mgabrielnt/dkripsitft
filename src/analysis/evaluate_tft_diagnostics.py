@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -9,20 +9,65 @@ from sklearn.metrics import (
     mean_absolute_error,
     mean_squared_error,
     r2_score,
-    confusion_matrix,
-    accuracy_score,
-    classification_report,
 )
 
 # ==============================
-# KONFIGURASI
+# KONFIGURASI GLOBAL
 # ==============================
 
 # Kalau True -> hitung juga metrik setelah bias correction (y_pred + mean residual)
 APPLY_BIAS_CORRECTION = True
 
-# Kalau False -> bagian klasifikasi bucket (F1, confusion) tidak dihitung
-ENABLE_BUCKET_CLASSIFICATION = False
+# Analisis fitur di level dataset (korelasi ke target, F-test, MI)
+ENABLE_DATASET_FEATURE_ANALYSIS = True
+
+# Analisis metrik per horizon (H+1..H+5) kalau kolom horizon ada
+ENABLE_HORIZON_ANALYSIS = True
+
+# Target utama di tft_master.csv (sesuaikan dengan yang dipakai TFT)
+TARGET_COLUMN = "close"
+
+# Kandidat fitur teknikal & sentimen (disesuaikan dengan pipeline-mu)
+FEATURE_CANDIDATES: List[str] = [
+    # --- Fitur teknikal ---
+    "close",
+    "volume",
+    "log_return_1d",
+    "vol_20",
+    "rsi_14",
+    "ma_5_div_ma_20",
+    "bb_width_20",
+    "volume_ma_ratio_20",
+    "return_mean_5d",
+    "return_std_5d",
+    # --- Fitur sentimen dari daily_sentiment / tft_master ---
+    "sentiment_text_mean",
+    "sentiment_market_mean",
+    "sentiment_lex_mean",
+    "sentiment_final_mean",
+    "sentiment_conf_mean",
+    "sentiment_conf_max",
+    "strong_market_count",
+    "strong_lex_count",
+    "sentiment_mean",
+    "sentiment_mean_3d",
+    "news_count",
+    "pos_count",
+    "neg_count",
+    "neu_count",
+    "news_count_3d",
+    "has_news",
+    "sentiment_shock",
+    "extreme_news",
+    "sentiment_vol_7d",
+    "sentiment_trend_5d",
+]
+
+# Kandidat kolom waktu yang mungkin ada di CSV prediksi
+TIME_COLUMN_CANDIDATES: List[str] = ["time_idx", "date", "ds", "timestamp"]
+
+# Kandidat kolom horizon yang mungkin ada di CSV prediksi
+HORIZON_COLUMN_CANDIDATES: List[str] = ["horizon", "step", "offset", "h"]
 
 # ==============================
 # Path setup
@@ -36,10 +81,18 @@ FIG_DIR = os.path.join(REPORT_DIR, "figures")
 os.makedirs(FIG_DIR, exist_ok=True)
 
 
+# ==============================
+# LOAD PREDICTIONS
+# ==============================
+
 def load_predictions() -> Dict[str, pd.DataFrame]:
     """
     Load baseline & hybrid prediction CSVs.
-    Expected columns: y_true, y_pred.
+    Expected columns: y_true, y_pred (+ optional time_idx/date/horizon).
+
+    Behaviour baru:
+    - Kalau file baseline ada, tapi hybrid tidak → tetap jalan (pakai baseline saja).
+    - Kalau keduanya tidak ada → raise FileNotFoundError.
     """
     paths = {
         "baseline": os.path.join(DATA_DIR, "predictions_tft_baseline_test.csv"),
@@ -49,17 +102,36 @@ def load_predictions() -> Dict[str, pd.DataFrame]:
     preds: Dict[str, pd.DataFrame] = {}
     for name, path in paths.items():
         if not os.path.exists(path):
-            raise FileNotFoundError(f"Tidak menemukan file prediksi: {path}")
+            print(
+                f"[WARN] File prediksi untuk '{name}' tidak ditemukan: {path}. "
+                f"Model ini akan di-skip."
+            )
+            continue
+
         df = pd.read_csv(path)
         required = {"y_true", "y_pred"}
         if not required.issubset(df.columns):
-            raise ValueError(
-                f"File {path} harus punya kolom {required}, "
-                f"sekarang kolomnya: {df.columns.tolist()}"
+            print(
+                f"[WARN] File {path} tidak punya kolom {required}, "
+                f"kolom sekarang: {df.columns.tolist()}. "
+                f"Model '{name}' akan di-skip."
             )
+            continue
+
         preds[name] = df
+
+    if not preds:
+        raise FileNotFoundError(
+            "Tidak ada file prediksi yang valid (baseline/hybrid). "
+            "Pastikan sudah menjalankan src.models.evaluate_tft_models terlebih dahulu."
+        )
+
     return preds
 
+
+# ==============================
+# METRIK REGRESI
+# ==============================
 
 def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
     """
@@ -70,7 +142,10 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
     rmse = np.sqrt(mse)
     # MAPE: hati-hati pembagian nol -> skip nol
     mask = y_true != 0
-    mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+    if np.any(mask):
+        mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
+    else:
+        mape = float("nan")
     # sMAPE
     denom = (np.abs(y_true) + np.abs(y_pred)) / 2.0
     smape = np.mean(
@@ -98,7 +173,7 @@ def error_by_quantile(
     """
     df = pd.DataFrame({"y_true": y_true, "y_pred": y_pred})
     q_labels = [f"Q{i+1}" for i in range(n_bins)]
-    df["bucket"], bins = pd.qcut(
+    df["bucket"], _ = pd.qcut(
         df["y_true"], q=n_bins, labels=q_labels, retbins=True, duplicates="drop"
     )
 
@@ -126,95 +201,55 @@ def error_by_quantile(
     return pd.DataFrame(rows)
 
 
-def add_level_buckets(df: pd.DataFrame, n_bins: int = 3) -> Tuple[pd.DataFrame, List[str]]:
+def metrics_by_horizon(df: pd.DataFrame, model_name: str) -> None:
     """
-    Buat kategori level harga (low / mid / high) berbasis quantile dari y_true,
-    lalu mapping y_pred ke bucket yang sama (berdasarkan batas quantile y_true).
+    Hitung metrik regresi per horizon (H+1..H+K) jika ada kolom horizon.
+    Cocok untuk TFT multi-horizon.
     """
-    df = df.copy()
-    y_true = df["y_true"].values
+    if not ENABLE_HORIZON_ANALYSIS:
+        return
 
-    quantiles = np.linspace(0, 1, n_bins + 1)
-    bins = np.quantile(y_true, quantiles)
-    bins = np.unique(bins)
-    if len(bins) <= 2:
-        # fallback: 2 bin saja
-        bins = np.quantile(y_true, [0.0, 0.5, 1.0])
-        bins = np.unique(bins)
+    horizon_col = None
+    for c in HORIZON_COLUMN_CANDIDATES:
+        if c in df.columns:
+            horizon_col = c
+            break
 
-    labels = [f"Q{i+1}" for i in range(len(bins) - 1)]
+    if horizon_col is None:
+        print(
+            f"[WARN] Tidak menemukan kolom horizon "
+            f"({HORIZON_COLUMN_CANDIDATES}) di prediksi {model_name}, "
+            f"skip analisis per horizon."
+        )
+        return
 
-    df["true_bucket"] = pd.cut(
-        df["y_true"],
-        bins=bins,
-        labels=labels,
-        include_lowest=True,
-    )
-    df["pred_bucket"] = pd.cut(
-        df["y_pred"],
-        bins=bins,
-        labels=labels,
-        include_lowest=True,
-    )
+    rows = []
+    print(f"\n[{model_name.upper()}] Metrik regresi per horizon ({horizon_col}):")
+    for h, sub in df.groupby(horizon_col):
+        if len(sub) < 5:
+            continue
+        y_t = sub["y_true"].values
+        y_p = sub["y_pred"].values
+        m = regression_metrics(y_t, y_p)
+        rows.append({"model": model_name, "horizon": h, **m})
 
-    return df, labels
+        mape_str = "NaN" if np.isnan(m["MAPE(%)"]) else f"{m['MAPE(%)']:.2f}"
+        print(
+            f"  Horizon={h}: n={len(sub)}, "
+            f"MAE={m['MAE']:.4f}, RMSE={m['RMSE']:.4f}, "
+            f"MAPE={mape_str}, R2={m['R2']:.4f}"
+        )
 
-
-def classification_metrics_from_buckets(
-    df: pd.DataFrame, labels: List[str]
-) -> Dict[str, Any]:
-    """
-    Hitung accuracy, confusion matrix, dan classification report
-    dari kolom true_bucket vs pred_bucket.
-    """
-    df_clean = df.dropna(subset=["true_bucket", "pred_bucket"]).copy()
-    if df_clean.empty:
-        return {
-            "accuracy": float("nan"),
-            "confusion_matrix": np.zeros((len(labels), len(labels)), dtype=int),
-            "classification_report": {},
-        }
-
-    y_true_cls = df_clean["true_bucket"].astype(str).values
-    y_pred_cls = df_clean["pred_bucket"].astype(str).values
-
-    acc = accuracy_score(y_true_cls, y_pred_cls)
-    cm = confusion_matrix(y_true_cls, y_pred_cls, labels=labels)
-    report = classification_report(
-        y_true_cls,
-        y_pred_cls,
-        labels=labels,
-        output_dict=True,
-        zero_division=0,
-    )
-    return {
-        "accuracy": acc,
-        "confusion_matrix": cm,
-        "classification_report": report,
-    }
+    if rows:
+        out_df = pd.DataFrame(rows)
+        out_path = os.path.join(REPORT_DIR, f"tft_regression_by_horizon_{model_name}.csv")
+        out_df.to_csv(out_path, index=False)
+        print(f"  [INFO] Ringkasan metrik per horizon disimpan ke: {out_path}")
 
 
-def plot_confusion_heatmap(
-    cm: np.ndarray,
-    labels: List[str],
-    title: str,
-    save_path: str,
-) -> None:
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        xticklabels=labels,
-        yticklabels=labels,
-    )
-    plt.xlabel("Predicted bucket")
-    plt.ylabel("True bucket")
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-
+# ==============================
+# KORELASI FITUR (PAIRWISE & DENGAN TARGET)
+# ==============================
 
 def plot_feature_correlation_heatmap() -> None:
     """
@@ -227,27 +262,7 @@ def plot_feature_correlation_heatmap() -> None:
 
     df = pd.read_csv(master_path)
 
-    cols = [
-        "close",
-        "volume",
-        "log_return_1d",
-        "vol_20",
-        "rsi_14",
-        "ma_5_div_ma_20",
-        "bb_width_20",
-        "volume_ma_ratio_20",
-        "return_mean_5d",
-        "return_std_5d",
-        "sentiment_mean",
-        "sentiment_mean_3d",
-        "news_count",
-        "news_count_3d",
-        "sentiment_shock",
-        "extreme_news",
-        "sentiment_vol_7d",
-        "sentiment_trend_5d",
-    ]
-    cols = [c for c in cols if c in df.columns]
+    cols = [c for c in FEATURE_CANDIDATES if c in df.columns]
     if not cols:
         print("[WARN] Tidak ada kolom yang cocok untuk korelasi, skip heatmap.")
         return
@@ -269,6 +284,138 @@ def plot_feature_correlation_heatmap() -> None:
     plt.close()
     print(f"[INFO] Heatmap korelasi fitur disimpan ke: {save_path}")
 
+
+def load_master_for_feature_analysis() -> Tuple[Optional[pd.DataFrame], List[str]]:
+    """
+    Load tft_master.csv dan pilih fitur yang tersedia + target.
+    """
+    master_path = os.path.join(DATA_DIR, "tft_master.csv")
+    if not os.path.exists(master_path):
+        print(f"[WARN] tft_master.csv tidak ditemukan di {master_path}, skip analisis fitur.")
+        return None, []
+
+    df = pd.read_csv(master_path)
+
+    if TARGET_COLUMN not in df.columns:
+        print(
+            f"[WARN] Kolom target '{TARGET_COLUMN}' tidak ditemukan di tft_master.csv, "
+            f"skip analisis fitur."
+        )
+        return None, []
+
+    available = [c for c in FEATURE_CANDIDATES if c in df.columns]
+    feature_cols = [c for c in available if c != TARGET_COLUMN]
+
+    if not feature_cols:
+        print("[WARN] Tidak ada fitur yang tersedia untuk analisis.")
+        return None, []
+
+    return df, feature_cols
+
+
+def compute_feature_target_correlation(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    target_col: str,
+) -> pd.DataFrame:
+    """
+    Korelasi Pearson fitur terhadap target, diurutkan berdasarkan |corr|.
+    """
+    rows = []
+    for col in feature_cols:
+        if col not in df.columns:
+            continue
+        if df[col].dtype.kind not in "bifc":
+            continue
+        corr_val = df[col].corr(df[target_col])
+        rows.append(
+            {
+                "feature": col,
+                "corr_with_target": corr_val,
+                "abs_corr": abs(corr_val),
+            }
+        )
+    if not rows:
+        print("[WARN] Tidak bisa menghitung korelasi fitur-target (tidak ada fitur numerik).")
+        return pd.DataFrame()
+
+    corr_df = pd.DataFrame(rows).sort_values("abs_corr", ascending=False)
+    out_path = os.path.join(REPORT_DIR, "feature_target_correlation.csv")
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    corr_df.to_csv(out_path, index=False)
+    print(f"[INFO] Korelasi fitur-target disimpan ke: {out_path}")
+    print("[INFO] Top fitur berdasarkan |corr| terhadap target:")
+    for _, row in corr_df.head(10).iterrows():
+        print(f"  {row['feature']:25s} corr={row['corr_with_target']:.4f}")
+    return corr_df
+
+
+def compute_filter_feature_scores(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    target_col: str,
+) -> pd.DataFrame:
+    """
+    Hitung F-test (f_regression) & Mutual Information untuk ranking fitur.
+    """
+    try:
+        from sklearn.feature_selection import f_regression, mutual_info_regression
+    except ImportError:
+        print("[WARN] sklearn.feature_selection tidak tersedia, skip filter methods.")
+        return pd.DataFrame()
+
+    cols = feature_cols + [target_col]
+    df_clean = df[cols].dropna()
+    if df_clean.empty:
+        print("[WARN] Data bersih untuk filter methods kosong, skip.")
+        return pd.DataFrame()
+
+    X = df_clean[feature_cols].values
+    y = df_clean[target_col].astype(float).values
+
+    f_vals, f_pvals = f_regression(X, y)
+    mi_vals = mutual_info_regression(X, y, random_state=42)
+
+    scores_df = pd.DataFrame(
+        {
+            "feature": feature_cols,
+            "F_score": f_vals,
+            "F_pvalue": f_pvals,
+            "MI": mi_vals,
+        }
+    ).sort_values("MI", ascending=False)
+
+    out_path = os.path.join(REPORT_DIR, "feature_filter_scores.csv")
+    scores_df.to_csv(out_path, index=False)
+    print(f"[INFO] Hasil filter methods (F-test & MI) disimpan ke: {out_path}")
+    print("[INFO] Top fitur berdasarkan Mutual Information:")
+    for _, row in scores_df.head(10).iterrows():
+        print(f"  {row['feature']:25s} MI={row['MI']:.4f}, F={row['F_score']:.2f}")
+    return scores_df
+
+
+def run_dataset_feature_analysis() -> None:
+    """
+    Analisis fitur di level dataset (bukan model):
+    - Korelasi fitur-target
+    - F-test & Mutual Information
+    (semua relevan untuk regresi TFT karena target-nya sama dengan model)
+    """
+    if not ENABLE_DATASET_FEATURE_ANALYSIS:
+        return
+
+    df, feature_cols = load_master_for_feature_analysis()
+    if df is None or not feature_cols:
+        return
+
+    print("[INFO] Analisis fitur di level dataset dimulai...")
+    compute_feature_target_correlation(df, feature_cols, TARGET_COLUMN)
+    compute_filter_feature_scores(df, feature_cols, TARGET_COLUMN)
+
+
+# ==============================
+# PLOTTING RESIDUAL & DIAGNOSTIK
+# ==============================
 
 def plot_residual_hist(
     y_true: np.ndarray,
@@ -306,6 +453,94 @@ def plot_true_vs_pred_scatter(
     plt.close()
 
 
+def plot_residual_vs_pred(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    title: str,
+    save_path: str,
+) -> None:
+    residuals = y_true - y_pred
+    plt.figure(figsize=(5, 4))
+    plt.scatter(y_pred, residuals, alpha=0.6)
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    plt.xlabel("y_pred")
+    plt.ylabel("Residual (y_true - y_pred)")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+
+def plot_residual_over_time(
+    df_pred: pd.DataFrame,
+    model_name: str,
+) -> None:
+    """
+    Plot residual vs waktu jika ada kolom waktu di df_pred.
+    Sangat relevan untuk TFT (time series forecasting).
+    """
+    time_col = None
+    for c in TIME_COLUMN_CANDIDATES:
+        if c in df_pred.columns:
+            time_col = c
+            break
+
+    if time_col is None:
+        print(
+            f"[WARN] Tidak menemukan kolom waktu ({TIME_COLUMN_CANDIDATES}) "
+            f"di prediksi {model_name}, skip residual vs waktu."
+        )
+        return
+
+    df = df_pred.copy()
+    df["residual"] = df["y_true"] - df["y_pred"]
+    df = df.sort_values(time_col)
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(df[time_col].values, df["residual"].values, marker="o", linestyle="-", alpha=0.7)
+    plt.axhline(0.0, color="black", linewidth=1)
+    plt.xlabel(time_col)
+    plt.ylabel("Residual")
+    plt.title(f"TFT {model_name.capitalize()} – Residual vs waktu")
+    plt.tight_layout()
+    path = os.path.join(FIG_DIR, f"residual_over_time_{model_name}.png")
+    plt.savefig(path, dpi=300)
+    plt.close()
+    print(f"  Plot residual vs waktu disimpan ke: {path}")
+
+
+def plot_residual_qq(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    title: str,
+    save_path: str,
+) -> None:
+    """
+    Q–Q plot residual vs distribusi normal (opsional, hanya kalau scipy tersedia).
+    """
+    try:
+        from scipy import stats
+    except ImportError:
+        print("[WARN] Paket 'scipy' belum terinstal, skip Q–Q plot residual.")
+        return
+
+    residuals = y_true - y_pred
+    if residuals.size == 0:
+        print("[WARN] Residual kosong, skip Q–Q plot.")
+        return
+
+    plt.figure(figsize=(5, 5))
+    stats.probplot(residuals, dist="norm", plot=plt)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300)
+    plt.close()
+
+
+# ==============================
+# BIAS CORRECTION
+# ==============================
+
 def compute_bias_corrected(
     y_true: np.ndarray, y_pred: np.ndarray
 ) -> Tuple[np.ndarray, float]:
@@ -318,6 +553,10 @@ def compute_bias_corrected(
     y_pred_corr = y_pred + bias
     return y_pred_corr, bias
 
+
+# ==============================
+# MAIN
+# ==============================
 
 def main() -> None:
     preds = load_predictions()
@@ -354,7 +593,10 @@ def main() -> None:
                     f"MAE={row['MAE']:.2f}, RMSE={row['RMSE']:.2f}"
                 )
 
-        # 3) Plot residual & scatter (tanpa koreksi)
+        # 3) Metrik per horizon (kalau kolom horizon ada)
+        metrics_by_horizon(df, name)
+
+        # 4) Plot residual & scatter (tanpa koreksi)
         resid_path = os.path.join(FIG_DIR, f"residual_hist_{name}.png")
         plot_residual_hist(
             y_true,
@@ -373,37 +615,26 @@ def main() -> None:
         )
         print(f"  Scatter y_true vs y_pred disimpan ke: {scatter_path}")
 
-        # 4) OPTIONAL: bucket classification (F1, confusion)
-        if ENABLE_BUCKET_CLASSIFICATION:
-            df_b, labels = add_level_buckets(df, n_bins=3)
-            cls = classification_metrics_from_buckets(df_b, labels)
+        resid_vs_pred_path = os.path.join(FIG_DIR, f"residual_vs_pred_{name}.png")
+        plot_residual_vs_pred(
+            y_true,
+            y_pred,
+            title=f"TFT {name.capitalize()} – Residual vs y_pred (raw)",
+            save_path=resid_vs_pred_path,
+        )
+        print(f"  Plot residual vs y_pred disimpan ke: {resid_vs_pred_path}")
 
-            print(f"\n[{name.upper()}] Bucket-level classification (zona harga)")
-            acc = cls["accuracy"]
-            if acc != acc:  # NaN check
-                print("  Accuracy = NaN (kemungkinan semua bucket kosong/NaN)")
-            else:
-                print(f"  Accuracy = {acc:.4f}")
+        # Residual vs waktu (jika ada kolom waktu di df)
+        plot_residual_over_time(df, name)
 
-            report = cls["classification_report"]
-            for label in labels:
-                stats = report.get(label, {})
-                f1 = stats.get("f1-score", float("nan"))
-                support = stats.get("support", 0)
-                if support == 0:
-                    print(f"  {label}: F1 = NaN (support=0)")
-                else:
-                    print(f"  {label}: F1 = {f1:.4f}, support = {support}")
-
-            cm = cls["confusion_matrix"]
-            cm_path = os.path.join(FIG_DIR, f"confusion_heatmap_{name}.png")
-            plot_confusion_heatmap(
-                cm,
-                labels=labels,
-                title=f"TFT {name.capitalize()} – Bucket Confusion Matrix",
-                save_path=cm_path,
-            )
-            print(f"  Confusion matrix heatmap disimpan ke: {cm_path}")
+        # Q–Q plot residual (opsional)
+        qq_path = os.path.join(FIG_DIR, f"residual_qq_{name}.png")
+        plot_residual_qq(
+            y_true,
+            y_pred,
+            title=f"TFT {name.capitalize()} – Q–Q plot residual (raw)",
+            save_path=qq_path,
+        )
 
         # 5) BIAS CORRECTION (OPSIONAL)
         if APPLY_BIAS_CORRECTION:
@@ -431,14 +662,19 @@ def main() -> None:
             )
             print(f"  Histogram residual (bias-corrected) disimpan ke: {resid_corr_path}")
 
-            scatter_corr_path = os.path.join(FIG_DIR, f"true_vs_pred_{name}_bias_corrected.png")
+            scatter_corr_path = os.path.join(
+                FIG_DIR, f"true_vs_pred_{name}_bias_corrected.png"
+            )
             plot_true_vs_pred_scatter(
                 y_true,
                 y_pred_corr,
                 title=f"TFT {name.capitalize()} – y_true vs y_pred (bias-corrected)",
                 save_path=scatter_corr_path,
             )
-            print(f"  Scatter y_true vs y_pred (bias-corrected) disimpan ke: {scatter_corr_path}")
+            print(
+                f"  Scatter y_true vs y_pred (bias-corrected) disimpan ke: "
+                f"{scatter_corr_path}"
+            )
 
     # Simpan ringkasan global MAE/RMSE/MAPE/sMAPE/R2 ke CSV
     if summary_rows:
@@ -449,10 +685,13 @@ def main() -> None:
         print("=" * 60)
         print(f"[INFO] Ringkasan metrik regresi disimpan ke: {summary_path}")
 
-    # 6) Feature correlation heatmap
+    # 6) Feature correlation heatmap (pairwise)
     print("=" * 60)
     print("[INFO] Mencari korelasi fitur dari tft_master.csv...")
     plot_feature_correlation_heatmap()
+
+    # 7) Analisis fitur di level dataset (F-test, MI, korelasi ke target)
+    run_dataset_feature_analysis()
 
 
 if __name__ == "__main__":

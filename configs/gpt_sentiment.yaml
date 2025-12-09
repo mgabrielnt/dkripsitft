@@ -1,7 +1,7 @@
 model_name: "gpt-5-nano"
 task: "sentiment_classification_3level"
 
-# 3 kelas polaritas baru untuk L_text
+# 3 kelas polaritas untuk L_text (GPT)
 labels:
   - NEGATIF
   - NETRAL
@@ -13,9 +13,28 @@ score_mapping:
   NETRAL: 0
   POSITIF: 1
 
-# Untuk chat.completions → pakai max_completion_tokens
-max_completion_tokens: 8
+# Jumlah maksimum token jawaban (chat.completions) PER REQUEST
+# Untuk gpt-5-nano jangan terlalu kecil, supaya tidak habis di reasoning internal.
+max_completion_tokens: 64
 
-# Untuk gpt-5-nano, temperature SELALU 1.
-# Di gpt_client.py nanti param ini diabaikan untuk gpt-5-nano.
+# Untuk gpt-5-nano, temperature boleh diabaikan di kode
 temperature: 1.0
+
+# Pengaturan pemangkasan teks input
+text:
+  max_chars: 2000   # hanya 2000 karakter pertama berita yang dikirim ke GPT
+
+# --- Parallel & saving (untuk script labeling) ---
+max_workers: 5                         # jumlah thread paralel untuk request GPT
+intermediate_save_every_n_calls: 500   # simpan progress tiap 500 call GPT
+
+# --- Retry untuk rate limit (429) ---
+rate_limit_retry_max_attempts: 5       # banyaknya percobaan ulang kalau 429
+rate_limit_initial_delay: 0.5          # mulai sleep 0.5 detik, lalu 1s, 2s, 4s, 8s
+
+# --- Reasoning effort khusus gpt-5-nano ---
+# Penting: minimal → biar tidak makan terlalu banyak reasoning tokens
+reasoning_effort: "minimal"
+
+# --- Debug (opsional, buat lihat output mentah GPT di console) ---
+debug_print_first_n: 10                # cetak 10 output GPT pertama

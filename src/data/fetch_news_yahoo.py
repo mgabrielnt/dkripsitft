@@ -10,17 +10,6 @@ dan menyimpannya ke CSV: data/raw/news/news_raw_yahoo.csv
     - lookback_years:
         * None / null  -> tidak ada filter tahun (ambil semua)
         * int > 0      -> hanya ambil berita dalam N tahun terakhir
-
-Output CSV kolom:
-    date            : tanggal (UTC) dalam format YYYY-MM-DD
-    ticker          : ticker saham (misal "BBCA.JK")
-    query           : penanda sumber, di sini "yahoo_finance"
-    title           : judul berita
-    description     : ringkasan/summary (kalau ada)
-    link            : URL ke berita
-    source          : nama publisher
-    published_raw   : epoch time (detik, UTC)
-    published_dt_utc: datetime lengkap UTC (ISO format)
 """
 
 import os
@@ -37,24 +26,24 @@ except ImportError as e:
         "Module 'yfinance' belum terinstall. Jalankan: pip install yfinance"
     ) from e
 
-# Lokasi root project (sesuaikan dengan strukturmu)
+# Lokasi root project
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DATA_RAW_NEWS_DIR = os.path.join(ROOT_DIR, "data", "raw", "news")
-CONFIG_YAHOO_PATH = os.path.join(ROOT_DIR, "configs", "yahoo_news.yaml")
-
 os.makedirs(DATA_RAW_NEWS_DIR, exist_ok=True)
 
+CONFIG_YAHOO_PATH = os.path.join(ROOT_DIR, "configs", "yahoo_news.yaml")
 OUT_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_yahoo.csv")
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "tickers": ["BBCA.JK", "BBRI.JK"],
-    # Default: None supaya TIDAK ada filter tahun kalau config tidak diisi
     "lookback_years": None,
 }
 
 
+# ---------------------------------------------------------------------------
+# Config helpers
+# ---------------------------------------------------------------------------
 def load_config(path: str) -> Dict[str, Any]:
-    """Load konfigurasi YAML. Kalau tidak ada, pakai DEFAULT_CONFIG."""
     if not os.path.exists(path):
         print(f"[WARN] Config Yahoo tidak ditemukan: {path}, pakai default: {DEFAULT_CONFIG}")
         return DEFAULT_CONFIG.copy()
@@ -62,26 +51,15 @@ def load_config(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
-    # Gabungkan dengan default (yang di YAML override)
     merged = DEFAULT_CONFIG.copy()
     merged.update({k: v for k, v in cfg.items() if v is not None})
-
     return merged
 
 
 def normalize_lookback_years(raw_value: Any) -> Optional[int]:
-    """
-    Normalisasi nilai lookback_years dari config.
-
-    Aturan:
-    - None / "none" / "null" / ""  -> None  (tidak pakai filter tahun)
-    - int/float > 0                -> int(raw_value)
-    - Tipe lain atau tidak valid   -> None (dan kasih warning)
-    """
     if raw_value is None:
         return None
 
-    # Kalau string: coba parse
     if isinstance(raw_value, str):
         txt = raw_value.strip().lower()
         if txt in {"", "none", "null"}:
@@ -96,13 +74,11 @@ def normalize_lookback_years(raw_value: Any) -> Optional[int]:
             return None
         return val if val > 0 else None
 
-    # Kalau numeric
     if isinstance(raw_value, (int, float)):
         if raw_value <= 0:
             return None
         return int(raw_value)
 
-    # Tipe lain
     print(
         f"[WARN] Tipe lookback_years tidak dikenali ({type(raw_value)}). "
         "Filter tahun dimatikan."
@@ -110,6 +86,9 @@ def normalize_lookback_years(raw_value: Any) -> Optional[int]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
 def main() -> None:
     cfg = load_config(CONFIG_YAHOO_PATH)
 
@@ -135,9 +114,7 @@ def main() -> None:
         print(f"[INFO] Fetching Yahoo Finance news for {ticker}")
         yf_ticker = yf.Ticker(ticker)
 
-        # yfinance menjadikan .news sebagai property (list of dict)
         news_list = getattr(yf_ticker, "news", []) or []
-
         print(f"[INFO] Yahoo Finance mengembalikan {len(news_list)} item mentah untuk {ticker}.")
 
         if not news_list:
@@ -147,19 +124,15 @@ def main() -> None:
         kept_for_ticker = 0
 
         for item in news_list:
-            print("[DEBUG RAW ITEM]", item)  # supaya kelihatan struktur aslinya
+            # Debug bisa dimatikan jika sudah yakin
+            # print("[DEBUG RAW ITEM]", item)
 
-            # Yahoo format baru: field penting ada di item["content"]
             content = item.get("content") or {}
 
-            # ====== TITLE ======
-            title = (
-                content.get("title")
-                or item.get("title")
-                or ""
-            )
+            # TITLE
+            title = content.get("title") or item.get("title") or ""
 
-            # ====== SUMMARY / DESCRIPTION ======
+            # SUMMARY / DESCRIPTION
             description = (
                 content.get("summary")
                 or content.get("description")
@@ -168,15 +141,11 @@ def main() -> None:
                 or ""
             )
 
-            # ====== SOURCE / PUBLISHER ======
+            # SOURCE
             provider = content.get("provider") or {}
-            source = (
-                provider.get("displayName")
-                or item.get("publisher")
-                or "Yahoo Finance"
-            )
+            source = provider.get("displayName") or item.get("publisher") or "Yahoo Finance"
 
-            # ====== LINK ======
+            # LINK
             canonical = content.get("canonicalUrl") or {}
             click = content.get("clickThroughUrl") or {}
             link = (
@@ -187,17 +156,15 @@ def main() -> None:
                 or ""
             )
 
-            # ====== WAKTU PUBLIKASI ======
+            # WAKTU PUBLIKASI
             pub_time = item.get("providerPublishTime")
             dt_utc: Optional[datetime] = None
             pub_epoch: Optional[int] = None
 
-            # Format lama: providerPublishTime = epoch seconds
             if isinstance(pub_time, (int, float)):
                 dt_utc = datetime.fromtimestamp(pub_time, tz=timezone.utc)
                 pub_epoch = int(pub_time)
 
-            # Kalau belum dapat, coba format baru: ISO datetime di pubDate/displayTime
             if dt_utc is None:
                 pub_date_str = (
                     content.get("pubDate")
@@ -207,10 +174,7 @@ def main() -> None:
                 )
                 if pub_date_str:
                     try:
-                        # Contoh: "2025-09-12T16:32:00Z"
-                        dt_utc = datetime.fromisoformat(
-                            pub_date_str.replace("Z", "+00:00")
-                        )
+                        dt_utc = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
                         pub_epoch = int(dt_utc.timestamp())
                     except Exception as e:
                         print(
@@ -219,7 +183,6 @@ def main() -> None:
                         )
 
             if dt_utc is None:
-                # Kalau masih tidak ada timestamp yang valid, skip saja
                 print(
                     f"[DEBUG] Tidak ada timestamp valid untuk {ticker}, "
                     f"judul: {title[:50]!r}... → skip"
@@ -228,12 +191,7 @@ def main() -> None:
 
             date_utc = dt_utc.date()
 
-            # Filter berdasarkan min_date (kalau aktif)
             if min_date is not None and date_utc < min_date:
-                print(
-                    f"[DEBUG] News terlalu lama ({date_utc}) < {min_date}, "
-                    f"ticker={ticker}, judul={title[:50]!r}... → skip"
-                )
                 continue
 
             all_records.append(
@@ -256,10 +214,8 @@ def main() -> None:
             f"dari {len(news_list)} item mentah."
         )
 
-    # Setelah semua ticker diproses
-    if not all_records:
+    if not all_records and not os.path.exists(OUT_PATH):
         print("[WARN] Tidak ada berita Yahoo yang berhasil diambil (setelah filter).")
-        # tetap simpan CSV kosong supaya pipeline tidak error
         df_empty = pd.DataFrame(
             columns=[
                 "date",
@@ -277,18 +233,32 @@ def main() -> None:
         print(f"[INFO] Menyimpan file kosong ke: {OUT_PATH}")
         return
 
-    df = pd.DataFrame(all_records)
+    df_new = pd.DataFrame(all_records)
+    if not df_new.empty:
+        df_new["date"] = pd.to_datetime(df_new["date"], errors="coerce").dt.date
+        df_new = df_new.sort_values(["ticker", "date", "published_raw"])
 
-    # Pastikan tipe tanggal benar (kalau mau dipakai groupby di step berikutnya)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    if os.path.exists(OUT_PATH):
+        print(f"[INFO] Ditemukan file lama: {OUT_PATH}, lakukan merge incremental.")
+        df_old = pd.read_csv(OUT_PATH, parse_dates=["date"])
+        df_old["date"] = df_old["date"].dt.date
+        df_all = pd.concat([df_old, df_new], ignore_index=True)
+    else:
+        df_all = df_new
 
-    # Sort biar rapi
-    df = df.sort_values(["ticker", "date", "published_raw"])
+    if not df_all.empty:
+        before = len(df_all)
+        df_all = df_all.drop_duplicates(
+            subset=["ticker", "date", "title", "link"], keep="last"
+        )
+        after = len(df_all)
+        print(f"[INFO] Drop duplikat (ticker,date,title,link): {before} -> {after}")
+        df_all = df_all.sort_values(["ticker", "date", "published_raw"]).reset_index(
+            drop=True
+        )
 
-    print(f"[INFO] Total berita Yahoo (semua ticker, setelah filter): {len(df)}")
-    print(f"[INFO] Rentang tanggal: {df['date'].min()}  s/d  {df['date'].max()}")
-    print(f"[INFO] Menyimpan ke: {OUT_PATH}")
-    df.to_csv(OUT_PATH, index=False)
+    print(f"[INFO] Menyimpan berita Yahoo ke: {OUT_PATH}")
+    df_all.to_csv(OUT_PATH, index=False)
     print("[INFO] Done.")
 
 

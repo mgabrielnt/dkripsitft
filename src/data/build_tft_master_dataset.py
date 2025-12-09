@@ -30,7 +30,6 @@ def load_yaml(path: str) -> Dict[str, Any]:
 
 def ensure_columns(df: pd.DataFrame, cols: List[str], fill_value=0):
     """Pastikan setiap kolom ada; jika hilang isi dengan fill_value."""
-
     for col in cols:
         if col not in df.columns:
             df[col] = fill_value
@@ -76,6 +75,9 @@ def main():
         "news_count_3d",
         "has_news",
         "extreme_news",
+        # fitur tambahan untuk sentiment_feature_set = "v4/v5"
+        "sentiment_vol_7d",
+        "sentiment_trend_5d",
     ]
     df_s = ensure_columns(df_s, sentiment_cols, fill_value=0)
 
@@ -101,10 +103,10 @@ def main():
     # ==== Isi NaN khusus fitur sentimen ====
     sentiment_mean_cols = [
         "sentiment_mean",
-        "sentiment_max",
-        "sentiment_min",
         "sentiment_mean_3d",
         "sentiment_shock",
+        "sentiment_vol_7d",
+        "sentiment_trend_5d",
     ]
     count_cols = [
         "news_count",
@@ -133,7 +135,7 @@ def main():
     date_to_idx = {d: i for i, d in enumerate(unique_dates)}
     df["time_idx"] = df["date"].map(date_to_idx).astype("int64")
 
-    # Kolom urutan rapih (opsional)
+    # Kolom urutan rapi (opsional)
     base_cols = [
         "time_idx",
         "date",
@@ -142,7 +144,6 @@ def main():
         "month",
         "is_month_end",
     ]
-    # sisanya dibiarkan di belakang
     other_cols = [c for c in df.columns if c not in base_cols]
     df = df[base_cols + other_cols]
 
@@ -161,6 +162,10 @@ def main():
 
     print("[INFO] Split counts:")
     print(df["split"].value_counts())
+
+    # Log daftar fitur supaya bisa dicek mana yang mau dipakai/dibuang
+    print("\n[INFO] Daftar kolom final di tft_master.csv:")
+    print(df.columns.tolist())
 
     print(f"[INFO] Saving TFT master dataset to {OUT_PATH}")
     df.to_csv(OUT_PATH, index=False)

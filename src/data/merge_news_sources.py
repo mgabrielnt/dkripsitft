@@ -13,7 +13,7 @@ OUT_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_all_sources.csv")
 
 
 def main():
-    dfs = []
+    dfs: list[pd.DataFrame] = []
 
     if os.path.exists(GOOGLE_PATH):
         print(f"[INFO] Load Google RSS news dari: {GOOGLE_PATH}")

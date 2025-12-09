@@ -1,31 +1,20 @@
 """
-fetch_news_yahoo.py
+download_prices_yahoo.py
 
-Mengambil berita dari Yahoo Finance untuk daftar ticker
-dan menyimpannya ke CSV: data/raw/news/news_raw_yahoo.csv
+Mengambil data harga harian (OHLCV) dari Yahoo Finance untuk daftar ticker
+di configs/data.yaml dan menyimpannya ke:
 
-- Membaca konfigurasi dari configs/yahoo_news.yaml
-- Field penting:
-    - tickers: list string, contoh ["BBCA.JK", "BBRI.JK"]
-    - lookback_years:
-        * None / null  -> tidak ada filter tahun (ambil semua)
-        * int > 0      -> hanya ambil berita dalam N tahun terakhir
+    data/raw/prices/prices_all_raw.csv
 
-Output CSV kolom:
-    date            : tanggal (UTC) dalam format YYYY-MM-DD
-    ticker          : ticker saham (misal "BBCA.JK")
-    query           : penanda sumber, di sini "yahoo_finance"
-    title           : judul berita
-    description     : ringkasan/summary (kalau ada)
-    link            : URL ke berita
-    source          : nama publisher
-    published_raw   : epoch time (detik, UTC)
-    published_dt_utc: datetime lengkap UTC (ISO format)
+Versi SIMPLE:
+- Tidak incremental, selalu download ulang full dari start_date sampai hari ini.
+- Format long:
+    date, ticker, Open, High, Low, Close, Adj Close, Volume
 """
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict, Any, List
 
 import pandas as pd
 import yaml
@@ -37,197 +26,171 @@ except ImportError as e:
         "Module 'yfinance' belum terinstall. Jalankan: pip install yfinance"
     ) from e
 
-# Lokasi root project (sesuaikan dengan strukturmu)
+# Lokasi root project
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DATA_RAW_NEWS_DIR = os.path.join(ROOT_DIR, "data", "raw", "news")
-CONFIG_YAHOO_PATH = os.path.join(ROOT_DIR, "configs", "yahoo_news.yaml")
+DATA_RAW_PRICES_DIR = os.path.join(ROOT_DIR, "data", "raw", "prices")
+os.makedirs(DATA_RAW_PRICES_DIR, exist_ok=True)
 
-os.makedirs(DATA_RAW_NEWS_DIR, exist_ok=True)
-
-OUT_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_yahoo.csv")
-
-DEFAULT_CONFIG = {
-    "tickers": ["BBCA.JK", "BBRI.JK"],
-    # Default: None supaya TIDAK ada filter tahun kalau config tidak diisi
-    "lookback_years": None,
-}
+CONFIG_DATA_PATH = os.path.join(ROOT_DIR, "configs", "data.yaml")
+OUT_PATH = os.path.join(DATA_RAW_PRICES_DIR, "prices_all_raw.csv")
 
 
-def load_config(path: str) -> Dict[str, Any]:
-    """Load konfigurasi YAML. Kalau tidak ada, pakai DEFAULT_CONFIG."""
+# ====================== Helper config ======================
+
+def load_data_config(path: str) -> Dict[str, Any]:
+    """Load configs/data.yaml sebagai dict."""
     if not os.path.exists(path):
-        print(f"[WARN] Config Yahoo tidak ditemukan: {path}, pakai default: {DEFAULT_CONFIG}")
-        return DEFAULT_CONFIG.copy()
-
+        raise FileNotFoundError(f"Config data.yaml tidak ditemukan: {path}")
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-
-    # Gabungkan dengan default (yang di YAML override)
-    merged = DEFAULT_CONFIG.copy()
-    merged.update({k: v for k, v in cfg.items() if v is not None})
-
-    return merged
+    return cfg
 
 
-def normalize_lookback_years(raw_value: Any) -> Optional[int]:
+def parse_start_date(raw: Any) -> datetime:
     """
-    Normalisasi nilai lookback_years dari config.
-
-    Aturan:
-    - None / "none" / "null" / ""  -> None  (tidak pakai filter tahun)
-    - int/float > 0                -> int(raw_value)
-    - Tipe lain atau tidak valid   -> None (dan kasih warning)
+    Parse start_date dari config menjadi datetime (naive).
+    Default fallback: 2017-01-01 kalau tidak ada / invalid.
     """
-    if raw_value is None:
-        return None
-
-    # Kalau string: coba parse
-    if isinstance(raw_value, str):
-        txt = raw_value.strip().lower()
-        if txt in {"", "none", "null"}:
-            return None
+    default_dt = datetime(2017, 1, 1)
+    if raw is None:
+        return default_dt
+    if isinstance(raw, str):
         try:
-            val = int(txt)
-        except ValueError:
-            print(
-                f"[WARN] lookback_years di config ('{raw_value}') bukan angka valid. "
-                "Filter tahun dimatikan."
-            )
-            return None
-        return val if val > 0 else None
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return default_dt
+    return default_dt
 
-    # Kalau numeric
-    if isinstance(raw_value, (int, float)):
-        if raw_value <= 0:
-            return None
-        return int(raw_value)
 
-    # Tipe lain
+def get_end_date_utc_plus_one() -> datetime:
+    """
+    Yahoo Finance: parameter end = exclusive.
+    Jadi kalau mau sampai hari ini (berdasarkan UTC), pakai (UTC_today + 1 hari).
+    """
+    today_utc = datetime.now(timezone.utc).date()
+    return datetime.combine(today_utc + timedelta(days=1), datetime.min.time())
+
+
+# ====================== Download per ticker ======================
+
+def download_prices_for_ticker(
+    ticker: str,
+    start_dt: datetime,
+    end_dt: datetime,
+) -> pd.DataFrame:
+    """
+    Download harga harian untuk satu ticker, dari start_dt (inclusive)
+    sampai end_dt (exclusive).
+    """
+    if start_dt >= end_dt:
+        print(f"[INFO] Rentang waktu kosong untuk {ticker}, skip.")
+        return pd.DataFrame()
+
     print(
-        f"[WARN] Tipe lookback_years tidak dikenali ({type(raw_value)}). "
-        "Filter tahun dimatikan."
+        f"[INFO] Download harga {ticker} "
+        f"dari {start_dt.date()} s/d {end_dt.date()} (exclusive end)"
     )
-    return None
 
+    df = yf.download(
+        ticker,
+        start=start_dt,
+        end=end_dt,
+        interval="1d",
+        auto_adjust=False,
+        progress=False,
+    )
 
-def main() -> None:
-    cfg = load_config(CONFIG_YAHOO_PATH)
+    if df.empty:
+        print(f"[WARN] Tidak ada data dari Yahoo untuk {ticker} dalam rentang ini.")
+        return pd.DataFrame()
 
-    tickers: List[str] = cfg.get("tickers", DEFAULT_CONFIG["tickers"])
-    raw_lookback = cfg.get("lookback_years", DEFAULT_CONFIG["lookback_years"])
-    lookback_years = normalize_lookback_years(raw_lookback)
+    df = df.reset_index()
 
-    print("[INFO] Konfigurasi Yahoo News:")
-    print(f"       tickers        : {tickers}")
-    print(f"       lookback_years : {lookback_years}")
-
-    min_date = None
-    if lookback_years is not None:
-        today = datetime.now(timezone.utc).date()
-        min_date = today - timedelta(days=365 * lookback_years)
-        print(f"[INFO] Filter tanggal aktif. Hanya ambil berita >= {min_date}")
+    # yfinance biasanya pakai kolom 'Date'
+    if "Date" in df.columns:
+        df.rename(columns={"Date": "date"}, inplace=True)
     else:
-        print("[INFO] Filter tanggal NONAKTIF (ambil semua berita yang dikembalikan Yahoo).")
+        # fallback kalau index adalah date
+        if "date" not in df.columns:
+            df.rename_axis("date", inplace=True)
+            df.reset_index(inplace=True)
 
-    all_records: List[Dict[str, Any]] = []
+    df["ticker"] = ticker
+
+    keep_cols = [
+        "date",
+        "ticker",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Adj Close",
+        "Volume",
+    ]
+    # jaga-jaga kalau ada kolom yang tidak tersedia
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    df = df[keep_cols]
+
+    return df
+
+
+# ====================== MAIN ======================
+
+def main():
+    cfg = load_data_config(CONFIG_DATA_PATH)
+
+    tickers: List[str] = cfg.get("tickers", []) or []
+    if not tickers:
+        raise ValueError(
+            "Daftar 'tickers' di configs/data.yaml kosong. "
+            "Minimal isi 1 ticker, misal: ['BBCA.JK', 'BBRI.JK']"
+        )
+
+    start_dt = parse_start_date(cfg.get("start_date", None))
+    end_dt = get_end_date_utc_plus_one()
+
+    print("[INFO] Konfigurasi download harga:")
+    print(f"       tickers    : {tickers}")
+    print(f"       start_date : {start_dt.date()}")
+    print(f"       end_date   : {end_dt.date()} (exclusive)")
+
+    all_frames: List[pd.DataFrame] = []
 
     for ticker in tickers:
-        print(f"[INFO] Fetching Yahoo Finance news for {ticker}")
-        yf_ticker = yf.Ticker(ticker)
-
-        # yfinance menjadikan .news sebagai property (list of dict)
-        news_list = getattr(yf_ticker, "news", []) or []
-
-        print(f"[INFO] Yahoo Finance mengembalikan {len(news_list)} item mentah untuk {ticker}.")
-
-        if not news_list:
-            print(f"[WARN] Tidak ada news dari Yahoo untuk {ticker}.")
-            continue
-
-        kept_for_ticker = 0
-
-        for item in news_list:
-            # Beberapa field yang biasa ada di yfinance news
-            pub_time = item.get("providerPublishTime")
-            title = item.get("title", "") or ""
-            description = item.get("summary", "") or ""
-            link = item.get("link", "") or ""
-            source = item.get("publisher", "Yahoo Finance") or "Yahoo Finance"
-
-            if pub_time is None:
-                # Tidak ada timestamp → sulit ditaruh dalam timeline harian
-                # Kalau mau disimpan juga, bisa diubah logika di sini.
-                # Untuk sekarang, kita skip dan tulis debug:
-                print(
-                    f"[DEBUG] News tanpa providerPublishTime untuk {ticker}, judul: {title[:50]!r}... → skip"
-                )
-                continue
-
-            dt_utc = datetime.fromtimestamp(pub_time, tz=timezone.utc)
-            date_utc = dt_utc.date()
-
-            # Filter berdasarkan min_date (kalau aktif)
-            if min_date is not None and date_utc < min_date:
-                # Debug ringan, supaya tahu kira-kira tanggalnya berapa
-                print(
-                    f"[DEBUG] News terlalu lama ({date_utc}) < {min_date}, "
-                    f"ticker={ticker}, judul={title[:50]!r}... → skip"
-                )
-                continue
-
-            all_records.append(
-                {
-                    "date": date_utc.isoformat(),       # YYYY-MM-DD
-                    "ticker": ticker,
-                    "query": "yahoo_finance",
-                    "title": title,
-                    "description": description,
-                    "link": link,
-                    "source": source,
-                    "published_raw": int(pub_time),
-                    "published_dt_utc": dt_utc.isoformat(),
-                }
+        df_t = download_prices_for_ticker(
+            ticker=ticker,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        if df_t.empty:
+            print(f"[WARN] Data kosong untuk {ticker}, akan dilewati.")
+        else:
+            df_t["date"] = pd.to_datetime(df_t["date"])
+            df_t = df_t.sort_values("date")
+            print(
+                f"[INFO] {ticker}: {len(df_t)} baris, "
+                f"rentang {df_t['date'].min().date()} s/d {df_t['date'].max().date()}"
             )
-            kept_for_ticker += 1
+            all_frames.append(df_t)
 
-        print(
-            f"[INFO] Total berita yang disimpan untuk {ticker}: {kept_for_ticker} "
-            f"dari {len(news_list)} item mentah."
-        )
-
-    # Setelah semua ticker diproses
-    if not all_records:
-        print("[WARN] Tidak ada berita Yahoo yang berhasil diambil (setelah filter).")
-        # tetap simpan CSV kosong supaya pipeline tidak error
-        df_empty = pd.DataFrame(
-            columns=[
-                "date",
-                "ticker",
-                "query",
-                "title",
-                "description",
-                "link",
-                "source",
-                "published_raw",
-                "published_dt_utc",
-            ]
-        )
-        df_empty.to_csv(OUT_PATH, index=False)
-        print(f"[INFO] Menyimpan file kosong ke: {OUT_PATH}")
+    if not all_frames:
+        print("[ERROR] Tidak ada data harga untuk semua ticker. File tidak dibuat.")
         return
 
-    df = pd.DataFrame(all_records)
+    df_all = pd.concat(all_frames, ignore_index=True)
 
-    # Pastikan tipe tanggal benar (kalau mau dipakai groupby di step berikutnya)
-    df["date"] = pd.to_datetime(df["date"]).dt.date
+    # Pastikan tanggal datetime & sort
+    df_all["date"] = pd.to_datetime(df_all["date"])
+    df_all = df_all.sort_values(["ticker", "date"]).reset_index(drop=True)
 
-    # Sort biar rapi
-    df = df.sort_values(["ticker", "date", "published_raw"])
+    print(f"[INFO] Total baris: {len(df_all)}")
+    print(
+        f"[INFO] Rentang tanggal global: "
+        f"{df_all['date'].min().date()}  s/d  {df_all['date'].max().date()}"
+    )
 
-    print(f"[INFO] Total berita Yahoo (semua ticker, setelah filter): {len(df)}")
-    print(f"[INFO] Rentang tanggal: {df['date'].min()}  s/d  {df['date'].max()}")
     print(f"[INFO] Menyimpan ke: {OUT_PATH}")
-    df.to_csv(OUT_PATH, index=False)
+    df_all.to_csv(OUT_PATH, index=False)
     print("[INFO] Done.")
 
 

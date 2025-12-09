@@ -151,13 +151,11 @@ def main():
         )
         missing_bdays.to_csv(MISSING_BDAYS_PATH, index=False)
 
+    # 6. Sanity check NaN
+    print("\n[INFO] Ringkasan NaN per kolom di prices_with_indicators:")
+    print(df.isna().sum())
+
     print("\n[INFO] Selesai cek kalender harga.\n")
-
-    df = pd.read_csv("data/interim/prices_with_indicators.csv")
-
-    print(df.isna().sum())   # cek jumlah NaN per kolom
-
-
 
 
 if __name__ == "__main__":

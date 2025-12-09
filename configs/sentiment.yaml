@@ -1,7 +1,8 @@
-# Konfigurasi multi-sumber sentimen (L_text, L_market, L_lex)
+# D:\skripsi\tft\configs\sentiment.yaml
+
 market:
   threshold_method: quantile
-  theta_q1: 0.75   # quantile(|AR|) untuk batas signifikan utama
+  theta_q1: 0.75   # quantile(|AR|) untuk batas signifikan utama (event cukup besar)
   theta_q2: 0.9    # quantile(|AR|) untuk sinyal pasar kuat
   benchmark_column: null  # opsi: kolom return benchmark kalau tersedia di prices_with_indicators
 
@@ -39,9 +40,14 @@ lexicon:
     - pelambatan
     - negatif
     - pesimistis
-  threshold_method: quantile
-  tau_q1: 0.7
-  tau_q2: 0.9
+
+  # ==== PERUBAHAN PENTING DI SINI ====
+  # Alih-alih quantile, pakai STD supaya threshold > 0 dan lebih stabil
+  # tau_q1: berapa kelipatan std untuk sinyal lexicon "biasa"
+  # tau_q2: berapa kelipatan std untuk sinyal lexicon "kuat"
+  threshold_method: std
+  tau_q1: 0.5   # ~0.5 * std → agak longgar (boleh nyala kalau sedikit menjauh dari 0)
+  tau_q2: 1.0   # ~1.0 * std → sinyal lexicon kuat (dipakai untuk strong_lex_signal)
 
 text:
   max_chars: 2000

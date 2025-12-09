@@ -4,9 +4,8 @@ set -euo pipefail
 # Jalankan seluruh pipeline: ambil data harga & berita -> pra-proses -> labeling sentimen ->
 # bangun dataset -> train -> evaluasi.
 # Semua perintah dijalankan dari root repo.
-
+ .\.venv\Scripts\Activate        
 # 1) Ambil berita
-python -m src.data.scrape_html_archives
 python -m src.data.fetch_news_rss_google
 python -m src.data.fetch_news_yahoo
 python -m src.data.merge_news_sources
@@ -32,5 +31,9 @@ python -m src.utils.update_experiments_best_ckpt
 # 6) Evaluasi & backtest sederhana
 python -m src.models.evaluate_tft_models
 python -m src.analysis.evaluate_tft_diagnostics
+python -m src.models.tune_tft_optuna --model-type baseline --n-trials 20
+python -m src.models.tune_tft_optuna --model-type hybrid --n-trials 20
 python -m src.models.evaluate_tft_backtest
+python -m src.models.evaluate_tft_backtest_full
 python -m src.analysis.compute_vif_features
+python -m streamlit run src/dashboard/app.py      

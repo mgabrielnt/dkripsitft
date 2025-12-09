@@ -1,22 +1,16 @@
-# Konfigurasi data harga saham (BASELINE TEKNIKAL)
-
 tickers:
   - "BBCA.JK"
   - "BBRI.JK"
+  - "TLKM.JK"
+  - "ASII.JK"
+  - "BMRI.JK"
+  - "UNVR.JK"
 
-# Periode pengambilan data harga (yfinance)
-start_date: "2020-01-01"
-end_date: "2025-11-27"
+start_date: "2017-01-01"
 
-# Horizon peramalan (berapa hari ke depan)
-# → dipakai juga sebagai max_prediction_length di TFT
 horizon: 5
-
-# Frekuensi data (Business day)
 freq: "B"
 
-# Proporsi split waktu (dipakai di build_tft_master_dataset)
-# Lebih banyak train supaya model tidak terlalu overfit
 train_ratio: 0.7
 val_ratio: 0.15
 test_ratio: 0.15

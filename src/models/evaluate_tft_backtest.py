@@ -1,3 +1,5 @@
+# D:\skripsi\tft\src\models\evaluate_tft_backtest.py
+
 import os
 from typing import Dict, Any, List, Tuple
 
@@ -6,11 +8,7 @@ import pandas as pd
 import yaml
 
 import lightning.pytorch as pl
-from torch.utils.data import DataLoader
-
-from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
-from pytorch_forecasting.data import GroupNormalizer
-
+from pytorch_forecasting import TemporalFusionTransformer
 
 # ==== Path dasar ====
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -20,7 +18,9 @@ CONFIG_MODEL_PATH = os.path.join(ROOT_DIR, "configs", "model_tft.yaml")
 CONFIG_EXPERIMENTS_PATH = os.path.join(ROOT_DIR, "configs", "experiments.yaml")
 
 TFT_MASTER_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
+FORECAST_TIMELINE_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_forecasts_timeline.csv")
 
+# ==== Kolom wajib ====
 TIME_FEATURES = ["time_idx", "day_of_week", "month", "is_month_end"]
 BASE_FEATURES = [
     "close",
@@ -39,6 +39,7 @@ SENTIMENT_FEATURES = [
     "sentiment_shock",
     "extreme_news",
 ]
+
 REQUIRED_BASE_COLS = ["ticker", *TIME_FEATURES, *BASE_FEATURES, "split"]
 REQUIRED_HYBRID_COLS = [*REQUIRED_BASE_COLS, *SENTIMENT_FEATURES]
 
@@ -48,212 +49,193 @@ def load_yaml(path: str) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def prepare_dataframe(df_all: pd.DataFrame, required_cols: List[str], label: str) -> pd.DataFrame:
-    missing = [c for c in required_cols if c not in df_all.columns]
+def prepare_dataframe(df_all_raw: pd.DataFrame, required_cols: List[str]) -> pd.DataFrame:
+    """
+    Bersihkan tft_master:
+      - pastikan semua kolom wajib ada
+      - drop baris NaN di kolom wajib
+      - cast time_idx & ticker ke tipe yang konsisten
+    """
+    missing = [c for c in required_cols if c not in df_all_raw.columns]
     if missing:
         raise ValueError(
-            f"Kolom {missing} tidak ditemukan di tft_master.csv (dibutuhkan untuk {label})."
+            "Kolom berikut tidak ditemukan di tft_master.csv: " + ", ".join(missing)
         )
 
-    before = len(df_all)
-    df_clean = df_all.dropna(subset=required_cols).copy()
-    after = len(df_clean)
-    print(f"[INFO] Drop baris NaN untuk {label}: {before} -> {after}")
+    before = len(df_all_raw)
+    df_all = df_all_raw.dropna(subset=required_cols).copy()
+    after = len(df_all)
+    print(f"[INFO] Drop baris NaN untuk {len(required_cols)} kolom wajib: {before} -> {after}")
 
-    df_clean["time_idx"] = df_clean["time_idx"].astype("int64")
-    df_clean["ticker"] = df_clean["ticker"].astype("category")
+    df_all["time_idx"] = df_all["time_idx"].astype("int64")
+    df_all["ticker"] = df_all["ticker"].astype("category")
 
-    return df_clean
-
-
-def make_training_dataset(
-    df_all: pd.DataFrame,
-    data_cfg: Dict[str, Any],
-    model_cfg: Dict[str, Any],
-    use_sentiment: bool,
-) -> TimeSeriesDataSet:
-    """
-    Bangun TimeSeriesDataSet untuk TRAIN saja.
-
-    PENTING:
-    - Daftar fitur HARUS sama dengan saat training:
-      * train_tft_baseline.py  -> use_sentiment=False
-      * train_tft_with_sentiment.py -> use_sentiment=True
-    """
-    target = model_cfg.get("target", "close")
-    max_encoder_length = model_cfg.get("max_encoder_length", 60)
-    max_prediction_length = model_cfg.get(
-        "max_prediction_length",
-        data_cfg.get("horizon", 5),
-    )
-
-    df_train = df_all[df_all["split"] == "train"].copy()
-
-    static_categoricals = ["ticker"]
-    static_reals: List[str] = []
-
-    time_varying_known_reals = TIME_FEATURES
-    time_varying_known_categoricals: List[str] = []
-
-    # === Fitur teknikal VIF sehat, sama seperti train_tft_baseline.py ===
-    time_varying_unknown_reals = BASE_FEATURES.copy()
-
-    if use_sentiment:
-        # === Tambahan fitur sentimen, sama persis dengan train_tft_with_sentiment.py ===
-        time_varying_unknown_reals += SENTIMENT_FEATURES
-
-    time_varying_unknown_categoricals: List[str] = []
-
-    training_ds = TimeSeriesDataSet(
-        df_train,
-        time_idx="time_idx",
-        target=target,
-        group_ids=["ticker"],
-        min_encoder_length=max_encoder_length // 2,
-        max_encoder_length=max_encoder_length,
-        min_prediction_length=max_prediction_length,
-        max_prediction_length=max_prediction_length,
-        static_categoricals=static_categoricals,
-        static_reals=static_reals,
-        time_varying_known_categoricals=time_varying_known_categoricals,
-        time_varying_known_reals=time_varying_known_reals,
-        time_varying_unknown_categoricals=time_varying_unknown_categoricals,
-        time_varying_unknown_reals=time_varying_unknown_reals,
-        target_normalizer=GroupNormalizer(
-            groups=["ticker"], transformation="softplus"
-        ),
-        add_relative_time_idx=True,
-        add_target_scales=True,
-        add_encoder_length=True,
-    )
-
-    return training_ds
+    return df_all
 
 
-def run_model_on_dataset(
+def run_future_forecast(
     model_ckpt: str,
-    test_ds: TimeSeriesDataSet,
+    df_all: pd.DataFrame,
+    required_cols: List[str],
     batch_size: int = 64,
     label: str = "MODEL",
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[List[str], np.ndarray]:
     """
-    Load model dari checkpoint dan jalankan .predict() pada test_ds.
+    Jalankan .predict() TFT untuk menghasilkan forecast future per ticker.
 
     Return:
-      y_true_2d, y_pred_2d dalam shape (n_samples, horizon)
+        tickers_order: urutan ticker yang dipakai model
+        y_pred_2d    : array (n_ticker, horizon)
     """
     if not os.path.exists(model_ckpt):
         raise FileNotFoundError(f"Checkpoint '{model_ckpt}' tidak ditemukan")
 
+    print(f"[INFO] Drop baris NaN & siapkan dataframe untuk {label}")
+    df_eval = df_all.dropna(subset=required_cols).copy()
+    df_eval["time_idx"] = df_eval["time_idx"].astype("int64")
+    df_eval["ticker"] = df_eval["ticker"].astype("category")
+    df_eval = df_eval.sort_values(["ticker", "time_idx"])
+
+    tickers_order = sorted(df_eval["ticker"].unique())
+    print(f"[INFO] Tickers (urutan tetap untuk prediksi {label}): {tickers_order}")
+
+    if not tickers_order:
+        raise ValueError("Tidak ada ticker yang valid di dataframe untuk forecasting.")
+
     print(f"[INFO] Load model {label} dari checkpoint: {model_ckpt}")
     pl.seed_everything(42)
-
     model = TemporalFusionTransformer.load_from_checkpoint(model_ckpt)
 
-    test_loader: DataLoader = test_ds.to_dataloader(
-        train=False,
+    # PENTING: di sini TIDAK di-unpack jadi dua nilai lagi.
+    preds_obj = model.predict(
+        df_eval,
+        mode="prediction",
         batch_size=batch_size,
         num_workers=0,
-    )
-
-    preds_obj = model.predict(
-        test_loader,
-        return_y=True,
         trainer_kwargs=dict(accelerator="cpu"),
     )
 
-    y_pred = preds_obj.output
-    y_true_raw = preds_obj.y
-
-    if isinstance(y_true_raw, (list, tuple)):
-        y_true = y_true_raw[0]
+    # Ambil tensor prediksi dari objek keluaran
+    if hasattr(preds_obj, "prediction"):
+        y_pred = preds_obj.prediction
     else:
-        y_true = y_true_raw
+        y_pred = preds_obj
 
-    y_pred_np = y_pred.detach().cpu().numpy()
-    y_true_np = y_true.detach().cpu().numpy()
+    # Konversi ke numpy 2D: (n_ticker, horizon)
+    if hasattr(y_pred, "detach"):
+        y_pred_np = y_pred.detach().cpu().numpy()
+    else:
+        y_pred_np = np.asarray(y_pred)
 
-    # Pastikan (n_samples, horizon)
     if y_pred_np.ndim == 3:
         y_pred_np = y_pred_np[..., 0]
-    if y_true_np.ndim == 3:
-        y_true_np = y_true_np[..., 0]
 
-    return y_true_np, y_pred_np
+    n_series, horizon = y_pred_np.shape
+    print(f"[INFO] Bentuk prediksi {label}: {y_pred_np.shape} (seharusnya (n_ticker, max_prediction_length))")
 
-
-def compute_metrics_per_horizon(
-    y_true_2d: np.ndarray,
-    y_pred_2d: np.ndarray,
-):
-    """
-    Hitung MAE, RMSE, MAPE global dan per horizon.
-    Format output disesuaikan dengan log backtest sebelumnya.
-    """
-    eps = 1e-8
-
-    y_true_flat = y_true_2d.reshape(-1)
-    y_pred_flat = y_pred_2d.reshape(-1)
-
-    mae = float(np.mean(np.abs(y_pred_flat - y_true_flat)))
-    rmse = float(np.sqrt(np.mean((y_pred_flat - y_true_flat) ** 2)))
-    mape = float(
-        np.mean(np.abs((y_pred_flat - y_true_flat) / (np.abs(y_true_flat) + eps))) * 100.0
-    )
-
-    print(f"  GLOBAL: MAE={mae:.4f}, RMSE={rmse:.4f}, MAPE={mape:.4f} %")
-
-    horizon = y_true_2d.shape[1]
-    for h in range(horizon):
-        yt_h = y_true_2d[:, h]
-        yp_h = y_pred_2d[:, h]
-
-        mae_h = float(np.mean(np.abs(yp_h - yt_h)))
-        rmse_h = float(np.sqrt(np.mean((yp_h - yt_h) ** 2)))
-        mape_h = float(
-            np.mean(np.abs((yp_h - yt_h) / (np.abs(yt_h) + eps))) * 100.0
-        )
+    if n_series != len(tickers_order):
         print(
-            f"  H+{h+1}: MAE={mae_h:.4f}, RMSE={rmse_h:.4f}, MAPE={mape_h:.4f} %"
+            f"[WARN] n_series ({n_series}) != jumlah ticker unik ({len(tickers_order)}). "
+            "Pastikan konfigurasi TimeSeriesDataSet sesuai (group_ids=['ticker'])."
         )
 
+    return tickers_order, y_pred_np
 
-def build_windows(df_test: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+
+def build_timeline_with_forecast(
+    df_all_raw: pd.DataFrame,
+    tickers_base: List[str],
+    y_pred_base_2d: np.ndarray,
+    tickers_hybrid: List[str],
+    y_pred_hybrid_2d: np.ndarray,
+) -> pd.DataFrame:
     """
-    Bagi test set menjadi 3 window waktu: early, mid, late.
-    Berdasarkan kuantil time_idx test.
+    Bangun dataframe timeline:
+        - Baris historis: close dari tft_master, pred_* = NaN
+        - Baris forecast: tanggal future per ticker, close=NaN, pred diisi
     """
-    df_test = df_test.sort_values(["time_idx", "ticker"]).copy()
+    df_hist = df_all_raw[["date", "ticker", "split", "close"]].copy()
+    df_hist = df_hist.sort_values(["ticker", "date"]).reset_index(drop=True)
+    df_hist["pred_baseline"] = np.nan
+    df_hist["pred_hybrid"] = np.nan
 
-    q1 = df_test["time_idx"].quantile(1 / 3)
-    q2 = df_test["time_idx"].quantile(2 / 3)
+    # Mapping ticker -> pred arrays
+    pred_base_map = {}
+    if y_pred_base_2d is not None and tickers_base:
+        for i, t in enumerate(tickers_base):
+            pred_base_map[str(t)] = y_pred_base_2d[i]
 
-    early = df_test[df_test["time_idx"] <= q1].copy()
-    mid = df_test[(df_test["time_idx"] > q1) & (df_test["time_idx"] <= q2)].copy()
-    late = df_test[df_test["time_idx"] > q2].copy()
+    pred_hybrid_map = {}
+    if y_pred_hybrid_2d is not None and tickers_hybrid:
+        for i, t in enumerate(tickers_hybrid):
+            pred_hybrid_map[str(t)] = y_pred_hybrid_2d[i]
 
-    print("\n[INFO] Window sizes (test set):")
-    print(f"  early: {len(early)} rows")
-    print(f"  mid  : {len(mid)} rows")
-    print(f"  late : {len(late)} rows")
+    forecast_rows = []
 
-    return {
-        "early": early,
-        "mid": mid,
-        "late": late,
-    }
+    # Pastikan kolom date sudah Timestamp
+    if not np.issubdtype(df_hist["date"].dtype, np.datetime64):
+        df_hist["date"] = pd.to_datetime(df_hist["date"])
+
+    tickers_all = sorted(df_hist["ticker"].unique())
+    for ticker in tickers_all:
+        df_t = df_hist[df_hist["ticker"] == ticker]
+        if df_t.empty:
+            continue
+
+        last_date = df_t["date"].max()
+
+        base_preds = pred_base_map.get(str(ticker))
+        hybrid_preds = pred_hybrid_map.get(str(ticker))
+
+        # Kalau kedua model tidak punya forecast untuk ticker ini -> skip future
+        if base_preds is None and hybrid_preds is None:
+            continue
+
+        # Tentukan horizon dari salah satu yang ada
+        if base_preds is not None:
+            horizon = len(base_preds)
+        else:
+            horizon = len(hybrid_preds)
+
+        # Generate tanggal bursa (hari kerja) ke depan
+        future_dates = pd.bdate_range(
+            start=last_date + pd.Timedelta(days=1),
+            periods=horizon,
+        )
+
+        for step, d in enumerate(future_dates):
+            forecast_rows.append(
+                {
+                    "date": d,
+                    "ticker": ticker,
+                    "split": "forecast",
+                    "close": np.nan,
+                    "pred_baseline": float(base_preds[step]) if base_preds is not None else np.nan,
+                    "pred_hybrid": float(hybrid_preds[step]) if hybrid_preds is not None else np.nan,
+                }
+            )
+
+    df_future = pd.DataFrame(forecast_rows)
+    if df_future.empty:
+        print("[WARN] Tidak ada baris forecast future yang dihasilkan.")
+        df_timeline = df_hist.copy()
+    else:
+        df_timeline = pd.concat([df_hist, df_future], ignore_index=True)
+        df_timeline = df_timeline.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+    return df_timeline
 
 
-def main():
+def main() -> None:
     if not os.path.exists(TFT_MASTER_PATH):
         raise FileNotFoundError(f"Tidak ditemukan: {TFT_MASTER_PATH}")
+
+    print(f"[INFO] Membaca master dataset dari: {TFT_MASTER_PATH}")
+    df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
 
     data_cfg = load_yaml(CONFIG_DATA_PATH)
     model_cfg = load_yaml(CONFIG_MODEL_PATH)
     exp_cfg = load_yaml(CONFIG_EXPERIMENTS_PATH)
-
-    sentiment_repr = str(model_cfg.get("sentiment_representation", "raw")).lower()
-    sentiment_threshold = float(model_cfg.get("sentiment_bucket_threshold", 0.0))
 
     baseline_ckpts = exp_cfg["tft_baseline"]["checkpoint_paths"]
     hybrid_ckpts = exp_cfg["tft_with_sentiment"]["checkpoint_paths"]
@@ -261,102 +243,67 @@ def main():
     baseline_ckpt = baseline_ckpts[0] if baseline_ckpts else ""
     hybrid_ckpt = hybrid_ckpts[0] if hybrid_ckpts else ""
 
-    print(f"[INFO] Loading {TFT_MASTER_PATH}")
-    df_all_raw = pd.read_csv(TFT_MASTER_PATH, parse_dates=["date"])
+    batch_size = model_cfg.get("batch_size", 64)
 
-    df_all_base = prepare_dataframe(df_all_raw, REQUIRED_BASE_COLS, "baseline")
-
-    print("\n========== BACKTEST TFT BASELINE ==========")
-
-    # kolom wajib (tanpa sentimen, sama seperti evaluate_tft_models baseline)
-    print("\n[INFO] NaN per kolom (sebelum cleaning) di df_all (baseline):")
-    print(df_all_base[REQUIRED_BASE_COLS].isna().sum())
-
-    df_test = df_all_base[df_all_base["split"] == "test"].copy()
-    print(f"[INFO] Total test rows: {len(df_test)}")
-
-    # bangun window waktu dari test set
-    windows = build_windows(df_test)
-
-    # ===== BASELINE =====
+    # ================= BASELINE =================
     if not baseline_ckpt or not os.path.exists(baseline_ckpt):
-        print(f"[WARN] Checkpoint baseline tidak ditemukan ({baseline_ckpt}). Lewatkan BACKTEST BASELINE.")
-    else:
-        # training dataset baseline
-        training_base = make_training_dataset(
-            df_all=df_all_base,
-            data_cfg=data_cfg,
-            model_cfg=model_cfg,
-            use_sentiment=False,
+        raise FileNotFoundError(
+            f"Checkpoint baseline tidak ditemukan atau kosong: '{baseline_ckpt}'. "
+            "Pastikan train_tft_baseline sudah dijalankan dan experiments.yaml terupdate."
         )
 
-        print("\n==== BASELINE ====\n")
-        for win_name, df_win in windows.items():
-            if df_win.empty:
-                print(f"[Window: {win_name}] (skip, kosong)")
-                continue
+    print("\n[STEP] Siapkan dataframe untuk BASELINE (tanpa fitur sentimen)")
+    df_all_base = prepare_dataframe(df_all_raw, REQUIRED_BASE_COLS)
 
-            test_ds = TimeSeriesDataSet.from_dataset(
-                training_base,
-                df_win,
-                stop_randomization=True,
-                predict=False,
-            )
-
-            print(f"[Window: {win_name}]")
-            y_true, y_pred = run_model_on_dataset(
-                model_ckpt=baseline_ckpt,
-                test_ds=test_ds,
-                batch_size=model_cfg.get("batch_size", 64),
-                label="BASELINE",
-            )
-            compute_metrics_per_horizon(y_true, y_pred)
-            print("")
-
-    # ===== HYBRID =====
-    print("\n========== BACKTEST TFT HYBRID ==========")
-
-    if not hybrid_ckpt or not os.path.exists(hybrid_ckpt):
-        print(f"[WARN] Checkpoint hybrid tidak ditemukan ({hybrid_ckpt}). Lewatkan BACKTEST HYBRID.")
-        return
-
-    # Pastikan semua kolom sentimen tersedia
-    missing_sent_cols = [c for c in SENTIMENT_FEATURES if c not in df_all_raw.columns]
-    if missing_sent_cols:
-        print(f"[WARN] Kolom sentimen {missing_sent_cols} tidak ada di tft_master. Lewatkan BACKTEST HYBRID.")
-        return
-
-    df_all_hybrid = prepare_dataframe(df_all_raw, REQUIRED_HYBRID_COLS, "hybrid")
-
-    training_hybrid = make_training_dataset(
-        df_all=df_all_hybrid,
-        data_cfg=data_cfg,
-        model_cfg=model_cfg,
-        use_sentiment=True,
+    tickers_base, y_pred_base_2d = run_future_forecast(
+        model_ckpt=baseline_ckpt,
+        df_all=df_all_base,
+        required_cols=REQUIRED_BASE_COLS,
+        batch_size=batch_size,
+        label="BASELINE",
     )
 
-    print("\n==== HYBRID ====\n")
-    for win_name, df_win in build_windows(df_all_hybrid[df_all_hybrid["split"] == "test"]).items():
-        if df_win.empty:
-            print(f"[Window: {win_name}] (skip, kosong)")
-            continue
+    # ================= HYBRID =================
+    tickers_hybrid: List[str] = []
+    y_pred_hybrid_2d: np.ndarray = None  # type: ignore
 
-        test_ds = TimeSeriesDataSet.from_dataset(
-            training_hybrid,
-            df_win,
-            stop_randomization=True,
-            predict=False,
+    if hybrid_ckpt and os.path.exists(hybrid_ckpt):
+        missing_sent_cols = [c for c in SENTIMENT_FEATURES if c not in df_all_raw.columns]
+        if missing_sent_cols:
+            print(
+                f"[WARN] Kolom sentimen {missing_sent_cols} tidak ada di tft_master. "
+                "Forecast HYBRID tidak akan dihitung."
+            )
+        else:
+            print("\n[STEP] Siapkan dataframe untuk HYBRID (dengan fitur sentimen)")
+            df_all_hybrid = prepare_dataframe(df_all_raw, REQUIRED_HYBRID_COLS)
+
+            tickers_hybrid, y_pred_hybrid_2d = run_future_forecast(
+                model_ckpt=hybrid_ckpt,
+                df_all=df_all_hybrid,
+                required_cols=REQUIRED_HYBRID_COLS,
+                batch_size=batch_size,
+                label="HYBRID",
+            )
+    else:
+        print(
+            f"[WARN] Checkpoint HYBRID tidak ditemukan ({hybrid_ckpt}). "
+            "Timeline hanya akan berisi prediksi BASELINE."
         )
 
-        print(f"[Window: {win_name}]")
-        y_true_h, y_pred_h = run_model_on_dataset(
-            model_ckpt=hybrid_ckpt,
-            test_ds=test_ds,
-            batch_size=model_cfg.get("batch_size", 64),
-            label="HYBRID",
-        )
-        compute_metrics_per_horizon(y_true_h, y_pred_h)
-        print("")
+    # ================= BUILD TIMELINE =================
+    print("\n[STEP] Bangun timeline historis + forecast future")
+    df_timeline = build_timeline_with_forecast(
+        df_all_raw=df_all_raw,
+        tickers_base=tickers_base,
+        y_pred_base_2d=y_pred_base_2d,
+        tickers_hybrid=tickers_hybrid,
+        y_pred_hybrid_2d=y_pred_hybrid_2d,
+    )
+
+    print(f"[INFO] Timeline forecast disimpan ke: {FORECAST_TIMELINE_PATH}")
+    df_timeline.to_csv(FORECAST_TIMELINE_PATH, index=False)
+    print("[INFO] Selesai.")
 
 
 if __name__ == "__main__":

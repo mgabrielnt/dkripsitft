@@ -123,8 +123,7 @@ python -m src.data.check_price_calendar          # opsional
 python -m src.data.gpt_sentiment_labeling
 python -m src.data.aggregate_daily_sentiment
 
-# 4) Konversi skala (jika butuh label 5 kelas lama)
-python -m src.data.convert_sentiment_scale       # opsional
+
 
 # 5) Bangun master dataset TFT
 python -m src.data.build_tft_master_dataset

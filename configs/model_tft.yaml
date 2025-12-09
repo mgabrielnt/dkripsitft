@@ -1,65 +1,71 @@
-# ================================
-# KONFIGURASI GLOBAL TFT
+# ===============================
+# KONFIGURASI GLOBAL TFT (Revisi)
 # Dipakai oleh:
-# - train_tft_baseline.py
-# - train_tft_with_sentiment.py
-# ================================
+#   - src/models/train_tft_baseline.py
+#   - src/models/train_tft_with_sentiment.py
+# ===============================
 
 # Target yang diprediksi TFT
-# (sekarang tetap "close"; kalau nanti mau eksperimen return, bisa ganti ke "log_return_1d")
+# Gunakan "log_return_1d" untuk prediksi return harian (lebih stationary).
+# Jika tetap ingin prediksi harga langsung, bisa ubah ke "close".
 target: "close"
 
-# Panjang encoder/decoder
-max_encoder_length: 60          # 60 hari historis
-max_prediction_length: 5        # konsisten dengan data.horizon = 5
+# Panjang input historis (encoder) dan horizon prediksi (decoder)
+max_encoder_length: 60          # 60 hari historis (sekitar 3 bulan trading)
+max_prediction_length: 5        # 5 hari ke depan (1 pekan trading)
 
-# Training (BERLAKU UNTUK BASELINE & HYBRID)
+# =========================
+# TRAINING (GLOBAL)
+# Berlaku untuk BASELINE & HYBRID
+# =========================
 batch_size: 64
-max_epochs: 100                 # agak lebih panjang, tapi ada EarlyStopping
-learning_rate: 0.0005          # 5e-4 → lebih halus dari 1e-3 untuk TFT
+max_epochs: 100                 # batas atas epoch, EarlyStopping akan stop lebih awal
+learning_rate: 0.0005           # 5e-4 → cukup halus untuk TFT
 
-accelerator: "auto"             # "gpu" kalau nanti pakai GPU
-loss: "mae"                     # sebanding dengan MAE baseline naive
+# Hardware / kecepatan
+accelerator: "gpu"              # pakai RTX 3050; kalau bermasalah, ganti "auto" atau "cpu"
+devices: 1                      # 1 GPU
+precision: "32-true"
+num_workers: 3                  # worker DataLoader; kalau di Windows error/hang, ganti 0
 
-# Early stopping (dipakai di kedua trainer)
-early_stopping_patience: 10
+loss: "mae"                     # MAE (point forecast). Bisa pakai "quantile" utk probabilistic.
+
+# Early stopping
+early_stopping_patience: 10     # hentikan training jika 10 epoch val_loss tidak membaik
 
 # ================================
-# BASELINE TEKNIKAL SAJA
-# Dipakai langsung oleh:
+# BASELINE (TEKNIKAL SAJA)
+# Dipakai oleh:
 #   - train_tft_baseline.py
 # ================================
-
-# Model baseline ukuran "menengah": tidak sekecil 16, tapi masih aman untuk ~2k sample
 hidden_size: 64
 dropout: 0.10                   # baseline relatif sederhana → dropout cukup 0.1
 
 # Layer & ukuran internal TFT
 lstm_layers: 2
 attention_head_size: 4
-hidden_continuous_size: 32      # lebih besar sedikit supaya fitur continuous (indikator teknikal) kepakai optimal
+hidden_continuous_size: 32      # dimensi internal untuk fitur continuous
 
 # ================================
 # HYBRID (TEKNIKAL + SENTIMEN)
 # Dipakai oleh:
 #   - train_tft_with_sentiment.py
-#   hidden_size = hidden_size_hybrid (fallback ke hidden_size)
-#   dropout     = dropout_hybrid     (fallback ke dropout)
 # ================================
 
 # Hybrid sedikit lebih besar karena dia bawa fitur sentimen tambahan
-hidden_size_hybrid: 96          # > baseline (64) tapi masih jauh dari "overkill"
-dropout_hybrid: 0.15            # sedikit lebih besar supaya tidak overfit di fitur sentimen
+hidden_size_hybrid: 128         # > baseline (64) agar bisa belajar interaksi tambahan
+dropout_hybrid: 0.20            # dropout lebih besar utk cegah overfit
 
 # Representasi & konfigurasi fitur sentimen
-sentiment_representation: "raw"      # pakai nilai mean sentimen kontinu
-sentiment_bucket_threshold: 0.05     # ambang netral kalau nanti pakai "sign"
+# "raw"  → pakai nilai sentimen kontinu (mean, vol, dsb.)
+# "sign" → pakai bucket -1 / 0 / 1 (hari sangat negatif / netral / sangat positif)
+sentiment_representation: "raw"
+sentiment_bucket_threshold: 0.05   # ambang netral jika pakai "sign"
 
-# quantile clipping kamu sekarang hard-coded di script (0.995),
-# key di bawah boleh ada / boleh diabaikan (tidak dipakai langsung oleh script revisi)
-sentiment_clip_quantile: 0.995       
+# Kumpulan fitur sentimen yang digunakan
+# "final" → gunakan hasil seleksi via feature_filter_scores.csv (MI/F-test)
+# "all"   → pakai semua fitur sentimen numerik yang ada di tft_master.csv
+sentiment_feature_set: "final"
 
-# Set fitur sentimen:
-# - v3: mean, count, pos/neg/neu, shock, extreme_news
-# - v4: v3 + sentiment_vol_7d + sentiment_trend_5d  (lebih dinamis)
-sentiment_feature_set: "v4"
+# Untuk dokumentasi saja (tidak dipakai langsung di script, tapi biar konsisten dgn PDF)
+sentiment_clip_quantile: 0.995
