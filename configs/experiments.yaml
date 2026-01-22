@@ -1,6 +1,0 @@
-tft_baseline:
-  checkpoint_paths:
-  - D:/skripsi/tft/models/tft_baseline/tft-baseline-epoch=09-val_loss=377.0987.ckpt
-tft_with_sentiment:
-  checkpoint_paths:
-  - D:/skripsi/tft/models/tft_with_sentiment/tft-with-sentiment-epoch=04-val_loss=303.5286.ckpt

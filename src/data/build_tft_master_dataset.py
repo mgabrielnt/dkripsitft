@@ -1,14 +1,10 @@
-"""Bangun dataset TFT gabungan harga + indikator teknikal + sentimen multi-sumber.
-
-Alir data sentimen (versi baru):
-1) news_clean.csv (interim)
-2) python -m src.data.gpt_sentiment_labeling -> data/processed/news_with_sentiment_per_article.csv
-3) python -m src.data.aggregate_daily_sentiment -> data/processed/daily_sentiment.csv
-4) File ini merge prices_with_indicators.csv + daily_sentiment.csv -> tft_master.csv
 """
-import os
-from typing import Dict, Any, List
+Bangun dataset TFT Master dengan fitur "Interaction" (Sentimen x Volume)
+dan GATING MECHANISM (Filter Sinyal Lemah).
+"""
 
+import os
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -22,155 +18,131 @@ PRICES_PATH = os.path.join(DATA_INTERIM_DIR, "prices_with_indicators.csv")
 SENTIMENT_PATH = os.path.join(DATA_PROCESSED_DIR, "daily_sentiment.csv")
 OUT_PATH = os.path.join(DATA_PROCESSED_DIR, "tft_master.csv")
 
-
-def load_yaml(path: str) -> Dict[str, Any]:
-    with open(path, "r") as f:
+def load_yaml(path: str):
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+def drop_non_trading_days(df_p):
+    """Hapus baris dimana volume 0 atau NaN."""
+    df_p["volume"] = pd.to_numeric(df_p["volume"], errors="coerce").fillna(0)
+    return df_p[df_p["volume"] > 0].copy()
 
-def ensure_columns(df: pd.DataFrame, cols: List[str], fill_value=0):
-    """Pastikan setiap kolom ada; jika hilang isi dengan fill_value."""
-    for col in cols:
-        if col not in df.columns:
-            df[col] = fill_value
+def add_interaction_features(df):
+    """
+    Membuat fitur interaksi dengan GATING MECHANISM.
+    Hanya sinyal kuat yang diloloskan untuk mengurangi noise.
+    """
+    # 1. Sentiment x Volume Impact (Original)
+    # Log volume agar skalanya tidak meledak
+    log_vol = np.log1p(df["volume"])
+    raw_impact = df["sentiment_mean_3d"] * log_vol
+    
+    # --- PERBAIKAN: GATING MECHANISM (THRESHOLDING) ---
+    # Kita hanya ambil impact yang nilainya > 0.5 atau < -0.5
+    # Nilai kecil dianggap NOISE (dibuat jadi 0)
+    df["sentiment_vol_impact"] = raw_impact.apply(lambda x: x if abs(x) > 0.5 else 0.0)
+    
+    # 2. Sinyal Arah Eksplisit (Categorical Direction)
+    # Membantu model menangkap arah secara tegas (-1, 0, 1)
+    # Ini "contekan" langsung buat model agar DA naik
+    df["sentiment_dir_signal"] = 0.0
+    df.loc[df["sentiment_vol_impact"] > 0.5, "sentiment_dir_signal"] = 1.0
+    df.loc[df["sentiment_vol_impact"] < -0.5, "sentiment_dir_signal"] = -1.0
+    
     return df
 
+def build_keep_columns(df):
+    """Daftar kolom final untuk masuk ke TFT."""
+    
+    base = ["time_idx", "date", "ticker", "day_of_week", "month", "is_month_end", "split"]
+    target = ["close"]
+    
+    # Indikator Teknikal
+    tech = [
+        "volume", "log_return_1d", "vol_20", "rsi_14", 
+        "ma_5_div_ma_20", "bb_width_20", "gap_return_1d", "intraday_range_pct"
+    ]
+    
+    # Indikator Sentimen (UPDATED WITH DIR SIGNAL)
+    sent = [
+        "has_news", 
+        "news_count_3d", 
+        "sentiment_final_mean",      
+        "sentiment_mean_3d",         
+        "sentiment_ema_7d",          
+        "sentiment_ema_14d",         
+        "sentiment_trend_7d",        
+        "sentiment_intraday_std",    
+        "sentiment_vol_impact",      
+        "high_news_day",
+        "sentiment_dir_signal"       # <--- FITUR BARU PENTING
+    ]
+
+    # Gabung dan pastikan kolomnya ada di DF
+    all_cols = base + target + tech + sent
+    return [c for c in all_cols if c in df.columns]
 
 def main():
-    if not os.path.exists(PRICES_PATH):
-        raise FileNotFoundError(f"Tidak ditemukan file harga: {PRICES_PATH}")
-
-    if not os.path.exists(SENTIMENT_PATH):
-        raise FileNotFoundError(f"Tidak ditemukan file sentimen harian: {SENTIMENT_PATH}")
-
-    data_cfg = load_yaml(CONFIG_DATA_PATH)
-    tickers_cfg = data_cfg.get("tickers", None)
-    train_ratio = float(data_cfg.get("train_ratio", 0.6))
-    val_ratio = float(data_cfg.get("val_ratio", 0.2))
-    # sisanya otomatis jadi test
-
-    print(f"[INFO] Loading prices from {PRICES_PATH}")
+    # 1. Load Data
+    print(f"[INFO] Loading prices: {PRICES_PATH}")
     df_p = pd.read_csv(PRICES_PATH, parse_dates=["date"])
-
-    print(f"[INFO] Loading daily sentiment from {SENTIMENT_PATH}")
+    
+    print(f"[INFO] Loading sentiment: {SENTIMENT_PATH}")
     df_s = pd.read_csv(SENTIMENT_PATH, parse_dates=["date"])
 
-    # Pastikan kolom sentimen lengkap meski ada pipeline lama
-    sentiment_cols = [
-        "sentiment_text_mean",
-        "sentiment_market_mean",
-        "sentiment_lex_mean",
-        "sentiment_final_mean",
-        "sentiment_conf_mean",
-        "sentiment_conf_max",
-        "strong_market_count",
-        "strong_lex_count",
-        "sentiment_mean",
-        "sentiment_mean_3d",
-        "sentiment_shock",
-        "news_count",
-        "pos_count",
-        "neg_count",
-        "neu_count",
-        "news_count_3d",
-        "has_news",
-        "extreme_news",
-        # fitur tambahan untuk sentiment_feature_set = "v4/v5"
-        "sentiment_vol_7d",
-        "sentiment_trend_5d",
-    ]
-    df_s = ensure_columns(df_s, sentiment_cols, fill_value=0)
+    # 2. Clean Prices
+    df_p = drop_non_trading_days(df_p)
+    
+    # Config Split
+    data_cfg = load_yaml(CONFIG_DATA_PATH)
+    train_ratio = data_cfg.get("train_ratio", 0.7)
+    val_ratio = data_cfg.get("val_ratio", 0.2)
 
-    # Filter ticker sesuai config (kalau ada)
-    if tickers_cfg:
-        df_p = df_p[df_p["ticker"].isin(tickers_cfg)].copy()
-        df_s = df_s[df_s["ticker"].isin(tickers_cfg)].copy()
+    # 3. Merge Sentiment (Left Join ke Harga)
+    df = pd.merge(df_p, df_s, on=["ticker", "date"], how="left")
 
-    # Fitur kalender dasar
-    df_p["day_of_week"] = df_p["date"].dt.weekday
-    df_p["month"] = df_p["date"].dt.month
-    df_p["is_month_end"] = df_p["date"].dt.is_month_end.astype(int)
+    # 4. Fill NaN Sentimen (No News = 0)
+    sentiment_cols = [c for c in df_s.columns if c not in ["ticker", "date"]]
+    df[sentiment_cols] = df[sentiment_cols].fillna(0)
 
-    # Merge left: semua hari harga tetap ada meski tidak ada berita
-    df = pd.merge(
-        df_p,
-        df_s,
-        on=["ticker", "date"],
-        how="left",
-        suffixes=("", "_sent"),
-    )
+    # 5. Add Calendar Features
+    df["day_of_week"] = df["date"].dt.weekday
+    df["month"] = df["date"].dt.month
+    df["is_month_end"] = df["date"].dt.is_month_end.astype(int)
 
-    # ==== Isi NaN khusus fitur sentimen ====
-    sentiment_mean_cols = [
-        "sentiment_mean",
-        "sentiment_mean_3d",
-        "sentiment_shock",
-        "sentiment_vol_7d",
-        "sentiment_trend_5d",
-    ]
-    count_cols = [
-        "news_count",
-        "pos_count",
-        "neg_count",
-        "neu_count",
-        "news_count_3d",
-    ]
-    binary_cols = ["has_news", "extreme_news"]
+    # 6. Add Time Index
+    dates = sorted(df["date"].unique())
+    date_map = {d: i for i, d in enumerate(dates)}
+    df["time_idx"] = df["date"].map(date_map)
 
-    for col in sentiment_mean_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(float).fillna(0.0)
+    # 7. Add Interaction Features (GATING APPLIED)
+    print("[INFO] Adding interaction features & Gating Mechanism...")
+    df = add_interaction_features(df)
 
-    for col in count_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(0).astype(int)
-
-    for col in binary_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna(0).astype(int)
-
-    # time_idx global berbasis tanggal
-    df = df.sort_values(["date", "ticker"]).reset_index(drop=True)
-    unique_dates = df["date"].drop_duplicates().sort_values()
-    date_to_idx = {d: i for i, d in enumerate(unique_dates)}
-    df["time_idx"] = df["date"].map(date_to_idx).astype("int64")
-
-    # Kolom urutan rapi (opsional)
-    base_cols = [
-        "time_idx",
-        "date",
-        "ticker",
-        "day_of_week",
-        "month",
-        "is_month_end",
-    ]
-    other_cols = [c for c in df.columns if c not in base_cols]
-    df = df[base_cols + other_cols]
-
-    # ==== Bikin split train / val / test ====
-    unique_idx = sorted(df["time_idx"].unique())
-    n = len(unique_idx)
-
-    train_end = unique_idx[int(n * train_ratio) - 1]
-    val_end = unique_idx[int(n * (train_ratio + val_ratio)) - 1]
+    # 8. Split Data
+    dates_list = sorted(df["date"].unique())
+    n_dates = len(dates_list)
+    train_idx = int(n_dates * train_ratio)
+    val_idx = int(n_dates * (train_ratio + val_ratio))
+    
+    train_date_max = dates_list[train_idx]
+    val_date_max = dates_list[val_idx]
 
     df["split"] = "test"
-    df.loc[df["time_idx"] <= train_end, "split"] = "train"
-    df.loc[
-        (df["time_idx"] > train_end) & (df["time_idx"] <= val_end), "split"
-    ] = "val"
+    df.loc[df["date"] <= train_date_max, "split"] = "train"
+    df.loc[(df["date"] > train_date_max) & (df["date"] <= val_date_max), "split"] = "val"
 
-    print("[INFO] Split counts:")
-    print(df["split"].value_counts())
+    print(f"[INFO] Split Counts: {df['split'].value_counts().to_dict()}")
 
-    # Log daftar fitur supaya bisa dicek mana yang mau dipakai/dibuang
-    print("\n[INFO] Daftar kolom final di tft_master.csv:")
-    print(df.columns.tolist())
+    # 9. Filter Final Columns
+    final_cols = build_keep_columns(df)
+    df_final = df[final_cols].copy()
 
-    print(f"[INFO] Saving TFT master dataset to {OUT_PATH}")
-    df.to_csv(OUT_PATH, index=False)
+    # 10. Save
+    print(f"[INFO] Saving TFT Master to {OUT_PATH}")
+    print(f"[INFO] Final Columns: {df_final.columns.tolist()}")
+    df_final.to_csv(OUT_PATH, index=False)
     print("[INFO] Done.")
-
 
 if __name__ == "__main__":
     main()

@@ -6,13 +6,14 @@ di configs/data.yaml dan menyimpannya ke:
 
     data/raw/prices/prices_all_raw.csv
 
-Versi SIMPLE:
-- Tidak incremental, selalu download ulang full dari start_date sampai hari ini.
-- Format long:
-    date, ticker, Open, High, Low, Close, Adj Close, Volume
+Versi ROBUST:
+- Selalu download ulang full (non-incremental).
+- Ada mekanisme RETRY jika download gagal.
+- Format long: date, ticker, Open, High, Low, Close, Adj Close, Volume
 """
 
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List
 
@@ -38,19 +39,13 @@ OUT_PATH = os.path.join(DATA_RAW_PRICES_DIR, "prices_all_raw.csv")
 # ====================== Helper config ======================
 
 def load_data_config(path: str) -> Dict[str, Any]:
-    """Load configs/data.yaml sebagai dict."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config data.yaml tidak ditemukan: {path}")
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    return cfg
+        return yaml.safe_load(f) or {}
 
 
 def parse_start_date(raw: Any) -> datetime:
-    """
-    Parse start_date dari config menjadi datetime (naive).
-    Default fallback: 2017-01-01 kalau tidak ada / invalid.
-    """
     default_dt = datetime(2017, 1, 1)
     if raw is None:
         return default_dt
@@ -63,10 +58,6 @@ def parse_start_date(raw: Any) -> datetime:
 
 
 def get_end_date_utc_plus_one() -> datetime:
-    """
-    Yahoo Finance: parameter end = exclusive.
-    Jadi kalau mau sampai hari ini (berdasarkan UTC), pakai (UTC_today + 1 hari).
-    """
     today_utc = datetime.now(timezone.utc).date()
     return datetime.combine(today_utc + timedelta(days=1), datetime.min.time())
 
@@ -77,122 +68,123 @@ def download_prices_for_ticker(
     ticker: str,
     start_dt: datetime,
     end_dt: datetime,
+    max_retries: int = 3
 ) -> pd.DataFrame:
     """
-    Download harga harian untuk satu ticker, dari start_dt (inclusive)
-    sampai end_dt (exclusive).
+    Download harga harian dengan mekanisme RETRY.
     """
     if start_dt >= end_dt:
-        print(f"[INFO] Rentang waktu kosong untuk {ticker}, skip.")
         return pd.DataFrame()
 
-    print(
-        f"[INFO] Download harga {ticker} "
-        f"dari {start_dt.date()} s/d {end_dt.date()} (exclusive end)"
-    )
+    for attempt in range(max_retries):
+        try:
+            print(
+                f"[INFO] Download {ticker} (Attempt {attempt+1}/{max_retries}) "
+                f"from {start_dt.date()} to {end_dt.date()}..."
+            )
+            
+            df = yf.download(
+                ticker,
+                start=start_dt,
+                end=end_dt,
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                threads=False # Single thread lebih stabil untuk loop
+            )
 
-    df = yf.download(
-        ticker,
-        start=start_dt,
-        end=end_dt,
-        interval="1d",
-        auto_adjust=False,
-        progress=False,
-    )
+            if df.empty:
+                print(f"[WARN] Data kosong untuk {ticker}. Retrying..." if attempt < max_retries - 1 else "[ERR] Gagal total.")
+                time.sleep(2)
+                continue
 
-    if df.empty:
-        print(f"[WARN] Tidak ada data dari Yahoo untuk {ticker} dalam rentang ini.")
-        return pd.DataFrame()
+            # Sukses download, proses data
+            df = df.reset_index()
+            
+            # Standardisasi kolom Date
+            if "Date" in df.columns:
+                df.rename(columns={"Date": "date"}, inplace=True)
+            elif "date" not in df.columns:
+                df.rename_axis("date", inplace=True)
+                df.reset_index(inplace=True)
 
-    df = df.reset_index()
+            df["ticker"] = ticker
+            
+            # Flat column names (kadang yf kasih multi-index)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
 
-    # yfinance biasanya pakai kolom 'Date'
-    if "Date" in df.columns:
-        df.rename(columns={"Date": "date"}, inplace=True)
-    else:
-        # fallback kalau index adalah date
-        if "date" not in df.columns:
-            df.rename_axis("date", inplace=True)
-            df.reset_index(inplace=True)
+            keep_cols = ["date", "ticker", "Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            final_cols = [c for c in keep_cols if c in df.columns]
+            
+            return df[final_cols]
 
-    df["ticker"] = ticker
+        except Exception as e:
+            print(f"[ERROR] {ticker} attempt {attempt+1} failed: {e}")
+            time.sleep(2)
 
-    keep_cols = [
-        "date",
-        "ticker",
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Adj Close",
-        "Volume",
-    ]
-    # jaga-jaga kalau ada kolom yang tidak tersedia
-    keep_cols = [c for c in keep_cols if c in df.columns]
-    df = df[keep_cols]
-
-    return df
+    return pd.DataFrame() # Gagal setelah semua retries
 
 
 # ====================== MAIN ======================
 
 def main():
     cfg = load_data_config(CONFIG_DATA_PATH)
-
     tickers: List[str] = cfg.get("tickers", []) or []
+    
     if not tickers:
-        raise ValueError(
-            "Daftar 'tickers' di configs/data.yaml kosong. "
-            "Minimal isi 1 ticker, misal: ['BBCA.JK', 'BBRI.JK']"
-        )
+        raise ValueError("Config 'tickers' kosong. Isi data.yaml dulu.")
 
     start_dt = parse_start_date(cfg.get("start_date", None))
     end_dt = get_end_date_utc_plus_one()
 
-    print("[INFO] Konfigurasi download harga:")
-    print(f"       tickers    : {tickers}")
-    print(f"       start_date : {start_dt.date()}")
-    print(f"       end_date   : {end_dt.date()} (exclusive)")
+    print("==================================================")
+    print("   STOCK PRICE DOWNLOADER (Yahoo Finance)")
+    print("==================================================")
+    print(f" Tickers    : {len(tickers)} saham")
+    print(f" Start Date : {start_dt.date()}")
+    print("==================================================\n")
 
     all_frames: List[pd.DataFrame] = []
+    failed_tickers = []
 
     for ticker in tickers:
-        df_t = download_prices_for_ticker(
-            ticker=ticker,
-            start_dt=start_dt,
-            end_dt=end_dt,
-        )
-        if df_t.empty:
-            print(f"[WARN] Data kosong untuk {ticker}, akan dilewati.")
-        else:
+        df_t = download_prices_for_ticker(ticker, start_dt, end_dt)
+        
+        if not df_t.empty:
             df_t["date"] = pd.to_datetime(df_t["date"])
             df_t = df_t.sort_values("date")
-            print(
-                f"[INFO] {ticker}: {len(df_t)} baris, "
-                f"rentang {df_t['date'].min().date()} s/d {df_t['date'].max().date()}"
-            )
+            print(f"   -> OK: {len(df_t)} rows ({df_t['date'].min().date()} - {df_t['date'].max().date()})")
             all_frames.append(df_t)
+        else:
+            print(f"   -> FAILED: {ticker} (Data Empty)")
+            failed_tickers.append(ticker)
+        
+        # Jeda sopan agar tidak kena rate limit
+        time.sleep(0.5)
 
+    print("\n==================================================")
+    if failed_tickers:
+        print(f"[WARN] {len(failed_tickers)} ticker gagal didownload: {failed_tickers}")
+    
     if not all_frames:
-        print("[ERROR] Tidak ada data harga untuk semua ticker. File tidak dibuat.")
+        print("[ERROR] Tidak ada data yang berhasil diambil. Exit.")
         return
 
+    print("Combining dataframes...")
     df_all = pd.concat(all_frames, ignore_index=True)
-
-    # Pastikan tanggal datetime & sort
     df_all["date"] = pd.to_datetime(df_all["date"])
     df_all = df_all.sort_values(["ticker", "date"]).reset_index(drop=True)
 
-    print(f"[INFO] Total baris: {len(df_all)}")
-    print(
-        f"[INFO] Rentang tanggal global: "
-        f"{df_all['date'].min().date()}  s/d  {df_all['date'].max().date()}"
-    )
-
-    print(f"[INFO] Menyimpan ke: {OUT_PATH}")
-    df_all.to_csv(OUT_PATH, index=False)
-    print("[INFO] Done.")
-
+    print(f"[INFO] Total Rows: {len(df_all)}")
+    print(f"[INFO] Saving to: {OUT_PATH}")
+    
+    try:
+        df_all.to_csv(OUT_PATH, index=False)
+        print("[SUCCESS] Data saved successfully.")
+    except Exception as e:
+        print(f"[CRITICAL] Gagal menyimpan file CSV: {e}")
+        print("Coba tutup file jika sedang dibuka di Excel!")
 
 if __name__ == "__main__":
     main()

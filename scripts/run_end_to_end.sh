@@ -7,8 +7,6 @@ set -euo pipefail
  .\.venv\Scripts\Activate        
 # 1) Ambil berita
 python -m src.data.fetch_news_rss_google
-python -m src.data.fetch_news_yahoo
-python -m src.data.merge_news_sources
 python -m src.data.preprocess_news_text
 
 # 2) Ambil harga dan hitung indikator teknikal
@@ -26,14 +24,7 @@ python -m src.data.build_tft_master_dataset
 # 5) Training TFT baseline & hybrid
 python -m src.models.train_tft_baseline
 python -m src.models.train_tft_with_sentiment
-python -m src.utils.update_experiments_best_ckpt
 
-# 6) Evaluasi & backtest sederhana
-python -m src.models.evaluate_tft_models
-python -m src.analysis.evaluate_tft_diagnostics
-python -m src.models.tune_tft_optuna --model-type baseline --n-trials 20
-python -m src.models.tune_tft_optuna --model-type hybrid --n-trials 20
-python -m src.models.evaluate_tft_backtest
-python -m src.models.evaluate_tft_backtest_full
+python -m src.models.evaluate_results  
 python -m src.analysis.compute_vif_features
 python -m streamlit run src/dashboard/app.py      
