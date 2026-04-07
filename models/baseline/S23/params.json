@@ -1,0 +1,9 @@
+{
+  "scenario": "S23",
+  "learning_rate": 0.0007,
+  "hidden_size": 96,
+  "batch_size": 64,
+  "best_val_loss": 50.932861328125,
+  "best_model_path": "D:\\skripsi\\tft\\models\\baseline\\S23\\best-checkpoint.ckpt",
+  "status": "ok"
+}

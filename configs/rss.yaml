@@ -1,104 +1,48 @@
 # ==============================================================================
-# CONFIG RSS (NO IDX - PURE TICKER)
+# CONFIG RSS (PURE TICKER)
 # Catatan:
-# - Bagian GOOGLE HISTORY: spesifik per emiten → data paling bersih.
-# - Bagian RSS MARKET: berita makro/umum, diberi ticker khusus "MARKET"
-#   supaya tidak diduplikasi ke semua ticker.
+# - File ini hanya memuat query yang memang dipakai model saat ini.
+# - Query MARKET sengaja dihapus karena pipeline saat ini tidak membentuk fitur
+#   market-wide terpisah untuk masuk ke model.
 # ==============================================================================
 
 default_language: "id"
 start_date_history: "2017-01-01"
-max_articles_per_query: null  # boleh isi angka, misal 500 kalau mau dibatasi
+max_articles_per_query: null
 
 queries:
-  # ============================================================================
-  # 1. GOOGLE NEWS - HISTORICAL (ARSIP 2017-SEKARANG)
-  #    -> Paling penting untuk dataset sentiment per ticker.
-  # ============================================================================
-
-  # --- BBCA ---
-  - type: "google"
-    ticker: "BBCA.JK"
-    language: "id"
-    query: '(BBCA OR "Bank Central Asia" OR "BCA") saham'
-
-  - type: "google"
-    ticker: "BBCA.JK"
-    language: "id"
-    query: 'site:kontan.co.id (BBCA OR "Bank Central Asia" OR "BCA")'
-
-  # --- BBRI ---
   - type: "google"
     ticker: "BBRI.JK"
     language: "id"
     query: '(BBRI OR "Bank Rakyat Indonesia" OR "BRI") saham'
-
   - type: "google"
     ticker: "BBRI.JK"
     language: "id"
     query: 'site:kontan.co.id (BBRI OR "Bank Rakyat Indonesia" OR "BRI")'
 
-  # --- TLKM ---
   - type: "google"
     ticker: "TLKM.JK"
     language: "id"
     query: '(TLKM OR "Telkom Indonesia" OR "Telkom") saham'
-
   - type: "google"
     ticker: "TLKM.JK"
     language: "id"
     query: 'site:kontan.co.id (TLKM OR "Telkom Indonesia" OR "Telkom")'
 
-  # --- ASII ---
   - type: "google"
     ticker: "ASII.JK"
     language: "id"
     query: '(ASII OR "Astra International" OR "Astra") saham'
-
   - type: "google"
     ticker: "ASII.JK"
     language: "id"
     query: 'site:kontan.co.id (ASII OR "Astra International" OR "Astra")'
 
-  # --- BMRI ---
   - type: "google"
     ticker: "BMRI.JK"
     language: "id"
     query: '(BMRI OR "Bank Mandiri" OR "Mandiri") saham'
-
   - type: "google"
     ticker: "BMRI.JK"
     language: "id"
     query: 'site:kontan.co.id (BMRI OR "Bank Mandiri" OR "Mandiri")'
-
-  # --- UNVR (INI YANG TADINYA NGGAK ADA) ---
-  - type: "google"
-    ticker: "UNVR.JK"
-    language: "id"
-    query: '(UNVR OR "Unilever Indonesia" OR "Unilever") saham'
-
-  - type: "google"
-    ticker: "UNVR.JK"
-    language: "id"
-    query: 'site:kontan.co.id (UNVR OR "Unilever Indonesia" OR "Unilever")'
-
-  # ============================================================================
-  # 2. MARKET-WIDE RSS (UMUM / MAKRO)
-  #    -> Diberi ticker khusus "MARKET", BUKAN per-emiten.
-  #       Nanti dipakai untuk fitur sentiment_market_mean.
-  # ============================================================================
-
-  - type: "rss"
-    ticker: "MARKET"
-    rss_url: "https://rss.kontan.co.id/news/keuangan"
-    source_name: "Kontan - Keuangan (Market)"
-
-  - type: "rss"
-    ticker: "MARKET"
-    rss_url: "https://www.cnbcindonesia.com/market/rss/"
-    source_name: "CNBC Indonesia - Market"
-
-  - type: "rss"
-    ticker: "MARKET"
-    rss_url: "https://www.cnnindonesia.com/ekonomi/rss"
-    source_name: "CNN Indonesia - Ekonomi"

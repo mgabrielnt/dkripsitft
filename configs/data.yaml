@@ -1,16 +1,18 @@
 tickers:
-  - "BBCA.JK"
   - "BBRI.JK"
   - "TLKM.JK"
   - "ASII.JK"
   - "BMRI.JK"
-  - "UNVR.JK"
 
 start_date: "2017-01-01"
+end_date: "2026-01-14"
 
-horizon: 5
+horizon: 3
 freq: "B"
 
 train_ratio: 0.7
 val_ratio: 0.15
 test_ratio: 0.15
+
+# gating untuk sentiment_dir_signal di build_tft_master_dataset.py
+sentiment_gate_threshold: 0.5

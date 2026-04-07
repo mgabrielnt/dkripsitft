@@ -1,137 +1,162 @@
-# file: src/data/aggregate_daily_sentiment.py
-"""
-Agregasi sentimen harian berbasis label multi-sumber {-1,0,+1} dengan
-Advanced Feature Engineering untuk TFT.
-
-Output utama per (ticker, date):
-1. Fitur Agregat Dasar:
-   - sentiment_final_mean, news_count
-2. Fitur Lanjutan (Advanced):
-   - sentiment_ema_7d, sentiment_ema_14d (Trend Halus)
-   - sentiment_trend_7d (Momentum)
-   - sentiment_intraday_std (Ketidakpastian/Divergensi berita harian)
-   - high_news_volume_flag (Apakah hari ini banjir berita?)
-"""
-
 import os
-import numpy as np
 import pandas as pd
+import yaml
 
-# Lokasi root project
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DATA_PROCESSED_DIR = os.path.join(ROOT_DIR, "data", "processed")
-
 SRC_PATH = os.path.join(DATA_PROCESSED_DIR, "news_with_sentiment_per_article.csv")
 OUT_PATH = os.path.join(DATA_PROCESSED_DIR, "daily_sentiment.csv")
+CONFIG_DATA_PATH = os.path.join(ROOT_DIR, "configs", "data.yaml")
+
+KEEP_COLS = [
+    "date",
+    "ticker",
+    "sentiment_final_mean",
+    "news_count_3d",
+    "sentiment_mean_3d",
+    "sentiment_ema_7d",
+    "sentiment_trend_7d",
+]
+
+
+def load_data_cfg() -> dict:
+    with open(CONFIG_DATA_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_allowed_tickers() -> set[str]:
+    cfg = load_data_cfg()
+    return {str(t).strip().upper() for t in cfg.get("tickers", []) if str(t).strip()}
+
+
+def parse_end_date(raw):
+    if raw is None:
+        return None
+    dt = pd.to_datetime(raw, errors="coerce")
+    return None if pd.isna(dt) else dt.normalize()
 
 
 def shift_to_next_monday(d: pd.Timestamp) -> pd.Timestamp:
-    """Geser berita weekend ke hari Senin berikutnya."""
     if pd.isna(d):
         return d
-    wd = d.weekday()  # 0=Mon ... 6=Sun
-    if wd >= 5:
-        return d + pd.Timedelta(days=7 - wd)
-    return d
+    return d + pd.Timedelta(days=7 - d.weekday()) if d.weekday() >= 5 else d
 
-def calculate_advanced_features(df_daily: pd.DataFrame) -> pd.DataFrame:
-    """Menghitung fitur turunan (Rolling, EMA, Trend) per ticker."""
-    df_daily = df_daily.sort_values("date").copy()
-    
-    # 1. Rolling Mean Biasa (3 Hari) - Sinyal Jangka Pendek
-    df_daily["sentiment_mean_3d"] = df_daily["sentiment_final_mean"].rolling(window=3, min_periods=1).mean()
-    df_daily["news_count_3d"] = df_daily["news_count"].rolling(window=3, min_periods=1).sum()
 
-    # 2. Exponential Moving Average (EMA) - Sinyal Trend Halus
-    # EMA lebih responsif terhadap data baru dibanding rolling mean biasa
-    df_daily["sentiment_ema_7d"] = df_daily["sentiment_final_mean"].ewm(span=7, adjust=False).mean()
-    df_daily["sentiment_ema_14d"] = df_daily["sentiment_final_mean"].ewm(span=14, adjust=False).mean()
+def build_daily_features(g: pd.DataFrame) -> pd.DataFrame:
+    daily = (
+        g.groupby("date_shifted", as_index=False)
+        .agg(
+            sentiment_final_mean=("l_final", "mean"),
+            news_count=("l_final", "size"),
+        )
+        .rename(columns={"date_shifted": "date"})
+        .sort_values("date")
+    )
 
-    # 3. Sentiment Momentum / Trend
-    # Perubahan sentimen hari ini dibanding rata-rata 7 hari lalu (Are we getting better or worse?)
-    # Shift 1 untuk menghindari look-ahead bias yang ketat, atau bandingkan dengan lag
-    sent_lag_7d = df_daily["sentiment_final_mean"].shift(5).rolling(window=5, min_periods=1).mean()
-    df_daily["sentiment_trend_7d"] = df_daily["sentiment_final_mean"] - sent_lag_7d
+    if daily.empty:
+        return pd.DataFrame(columns=["date"] + [c for c in KEEP_COLS if c != "date"])
 
-    # 4. High News Volume Flag (Top 90% percentile per ticker)
-    threshold = df_daily["news_count"].quantile(0.9)
-    if threshold == 0: threshold = 1
-    df_daily["high_news_day"] = (df_daily["news_count"] >= threshold).astype(int)
+    idx = pd.bdate_range(daily["date"].min(), daily["date"].max())
+    daily = (
+        daily.set_index("date")
+        .reindex(idx)
+        .rename_axis("date")
+        .reset_index()
+    )
 
-    return df_daily
+    daily[["sentiment_final_mean", "news_count"]] = (
+        daily[["sentiment_final_mean", "news_count"]].fillna(0.0)
+    )
+
+    daily["sentiment_mean_3d"] = (
+        daily["sentiment_final_mean"].rolling(3, min_periods=1).mean()
+    )
+    daily["news_count_3d"] = (
+        daily["news_count"].rolling(3, min_periods=1).sum()
+    )
+    daily["sentiment_ema_7d"] = (
+        daily["sentiment_final_mean"].ewm(span=7, adjust=False).mean()
+    )
+
+    prior_mean = daily["sentiment_final_mean"].shift(1).rolling(7, min_periods=1).mean()
+    daily["sentiment_trend_7d"] = (
+        daily["sentiment_final_mean"] - prior_mean
+    ).fillna(0.0)
+
+    return daily
+
 
 def main():
     if not os.path.exists(SRC_PATH):
         raise FileNotFoundError(f"File tidak ditemukan: {SRC_PATH}")
 
-    print(f"[INFO] Loading {SRC_PATH}")
-    df = pd.read_csv(SRC_PATH, parse_dates=["date", "event_date"])
+    df = pd.read_csv(SRC_PATH, parse_dates=["date"])
 
-    # Drop duplikat
-    df = df.drop_duplicates(subset=["date", "ticker", "title"]).copy()
-    
-    # Geser tanggal weekend
-    df["date"] = pd.to_datetime(df["date"])
+    required_cols = {"date", "ticker", "l_final"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise KeyError(
+            f"Kolom wajib tidak ditemukan di news_with_sentiment_per_article.csv: {sorted(missing)}"
+        )
+
+    cfg = load_data_cfg()
+    end_date = parse_end_date(cfg.get("end_date"))
+    allowed_tickers = load_allowed_tickers()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    df["l_final"] = pd.to_numeric(df["l_final"], errors="coerce")
+
+    if allowed_tickers:
+        df = df[df["ticker"].isin(allowed_tickers)].copy()
+
+    if "link" in df.columns:
+        df["link"] = df["link"].astype(str).str.strip()
+    if "text_for_label" in df.columns:
+        df["text_for_label"] = df["text_for_label"].astype(str).str.strip()
+
+    df = df.dropna(subset=["date", "ticker", "l_final"]).copy()
+
+    if end_date is not None:
+        df = df[df["date"] <= end_date].copy()
+
+    dedup_cols = ["ticker", "date"]
+    if "link" in df.columns:
+        dedup_cols.append("link")
+    elif "text_for_label" in df.columns:
+        dedup_cols.append("text_for_label")
+
+    df = df.drop_duplicates(subset=dedup_cols, keep="last").copy()
     df["date_shifted"] = df["date"].apply(shift_to_next_monday)
-    df["has_news"] = 1
 
-    all_daily = []
-
-    # Proses per Ticker
-    for ticker, g in df.groupby("ticker"):
-        g = g.copy()
-
-        # Agregasi Harian
-        agg_funcs = {
-            "l_final": ["mean", "std", "count"], # Mean sentiment, Uncertainty (std), Volume
-            "sentiment_conf": ["mean"],
-            "has_news": ["max"]
-        }
-        
-        daily = g.groupby("date_shifted").agg(agg_funcs).reset_index()
-        
-        # Ratakan MultiIndex columns
-        daily.columns = [
-            "date", 
-            "sentiment_final_mean", "sentiment_intraday_std", "news_count", 
-            "sentiment_conf_mean", 
-            "has_news"
-        ]
-        
+    out = []
+    for ticker, g in df.groupby("ticker", sort=True):
+        daily = build_daily_features(g.copy())
+        if daily.empty:
+            continue
         daily["ticker"] = ticker
-        
-        # Fill NaN untuk std (jika cuma 1 berita, std=NaN -> jadi 0)
-        daily["sentiment_intraday_std"] = daily["sentiment_intraday_std"].fillna(0.0)
+        out.append(daily[KEEP_COLS])
 
-        # Reindex ke full range date agar rolling window akurat (mengisi hari kosong dengan 0)
-        min_date, max_date = daily["date"].min(), daily["date"].max()
-        full_idx = pd.bdate_range(min_date, max_date)
-        daily = daily.set_index("date").reindex(full_idx).reset_index().rename(columns={"index": "date"})
-        
-        daily["ticker"] = ticker
-        
-        # Fill 0 untuk hari tanpa berita
-        cols_to_zero = ["sentiment_final_mean", "sentiment_intraday_std", "news_count", "sentiment_conf_mean", "has_news"]
-        daily[cols_to_zero] = daily[cols_to_zero].fillna(0)
+    if not out:
+        raise ValueError("Data kosong setelah agregasi sentimen.")
 
-        # Hitung Advanced Features
-        daily = calculate_advanced_features(daily)
-        
-        all_daily.append(daily)
+    result = (
+        pd.concat(out, ignore_index=True)
+        .sort_values(["ticker", "date"])
+        .reset_index(drop=True)
+    )
 
-    if not all_daily:
-        print("[WARN] Data kosong setelah agregasi.")
-        return
+    if end_date is not None:
+        result = result[result["date"] <= end_date].copy()
+    if allowed_tickers:
+        result = result[result["ticker"].isin(allowed_tickers)].copy()
 
-    df_daily = pd.concat(all_daily, ignore_index=True)
-    
-    # Sort dan Simpan
-    df_daily = df_daily.sort_values(["ticker", "date"])
-    
-    print(f"[INFO] Saving aggregates with advanced features to {OUT_PATH}")
-    print(f"[INFO] Columns: {df_daily.columns.tolist()}")
-    df_daily.to_csv(OUT_PATH, index=False)
-    print("[INFO] Done.")
+    os.makedirs(DATA_PROCESSED_DIR, exist_ok=True)
+    result.to_csv(OUT_PATH, index=False)
+
+    print(f"saved -> {OUT_PATH}")
+    print(result.columns.tolist())
+
 
 if __name__ == "__main__":
     main()

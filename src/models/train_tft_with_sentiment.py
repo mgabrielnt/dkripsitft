@@ -1,128 +1,154 @@
+import json
 import os
-import yaml
-import pandas as pd
-import torch
+import warnings
 from pathlib import Path
 
-# --- PERBAIKAN IMPORT (VITAL) ---
-# Menggunakan namespace 'lightning.pytorch' agar kompatibel dengan pytorch-forecasting terbaru
 import lightning.pytorch as pl
+import numpy as np
+import pandas as pd
+import torch
+import yaml
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-from pytorch_forecasting.data import GroupNormalizer
 from pytorch_forecasting.metrics import QuantileLoss
 
-# --- SETUP PATH ---
-SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent.parent
-CONFIG_PATH = PROJECT_ROOT / "configs" / "model_tft.yaml"
+warnings.filterwarnings("ignore")
+torch.set_float32_matmul_precision("medium")
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+CONFIG_PATH = os.path.join(ROOT_DIR, "configs", "model_tft.yaml")
+CONFIG_DATA_PATH = os.path.join(ROOT_DIR, "configs", "data.yaml")
+OUT_DIR = Path(r"D:/skripsi/tft/models/hybrid")
+CAT_COLS = ["ticker", "day_of_week", "month", "is_month_end"]
+REAL_COLS = [
+    "close", "volume", "log_return_1d", "log_return_2d", "vol_20", "rsi_14", "ma_5_div_ma_20",
+    "bb_width_20", "gap_return_1d", "intraday_range_pct", "news_count_3d", "sentiment_final_mean",
+    "sentiment_delta_1d", "sentiment_mean_3d", "sentiment_ema_7d", "sentiment_trend_7d", "sentiment_dir_signal",
+]
+FORBIDDEN_TICKERS = {"BBCA.JK", "UNVR.JK"}
 
-def load_config():
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
 
-def main():
-    config = load_config()
-    data_path = PROJECT_ROOT / config['data']['dataset_path']
-    
-    # 1. Load Data
-    df = pd.read_csv(data_path)
-    df['date'] = pd.to_datetime(df['date'])
-    df['ticker'] = df['ticker'].astype(str)
-    df['day_of_week'] = df['day_of_week'].astype(str)
-    df['month'] = df['month'].astype(str)
-    
-    # Filter Data Training
-    training_cutoff = df["time_idx"].max() - config['data']['max_prediction_length']
-    
-    # 2. Buat Dataset Training
-    # Pastikan 'sentiment_dir_signal' ada di list fitur
-    training = TimeSeriesDataSet(
-        df[lambda x: x.time_idx <= training_cutoff],
-        time_idx=config['data']['time_idx'],
-        target=config['data']['target'],
-        group_ids=config['data']['group_ids'],
-        min_encoder_length=config['data']['min_encoder_length'],
-        max_encoder_length=config['data']['max_encoder_length'],
-        max_prediction_length=config['data']['max_prediction_length'],
+def load_cfg():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_allowed_tickers():
+    with open(CONFIG_DATA_PATH, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    return {str(t).strip().upper() for t in cfg.get("tickers", []) if str(t).strip()}
+
+
+def ensure_cols(df: pd.DataFrame, cols, ctx=""):
+    miss = [c for c in cols if c not in df.columns]
+    if miss:
+        raise ValueError(f"{ctx} kolom wajib hilang: {miss}")
+
+
+def prepare_df(path: str, time_idx_col: str, target_col: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    ensure_cols(df, ["split", *CAT_COLS, time_idx_col, target_col], "[HYBRID]")
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    allowed_tickers = load_allowed_tickers()
+    if allowed_tickers:
+        df = df[df["ticker"].isin(allowed_tickers)].copy()
+    forbidden = FORBIDDEN_TICKERS & set(df["ticker"].unique())
+    if forbidden:
+        raise ValueError(f"[HYBRID] ticker terlarang masih ada: {sorted(forbidden)}")
+    df["split"] = df["split"].astype(str).str.strip().str.lower()
+    for c in CAT_COLS:
+        df[c] = df[c].astype(str)
+    df[time_idx_col] = pd.to_numeric(df[time_idx_col], errors="coerce")
+    if df[time_idx_col].isna().any():
+        order = ["ticker", "date"] if "date" in df.columns else ["ticker"]
+        df = df.sort_values(order).copy()
+        df[time_idx_col] = df.groupby("ticker").cumcount().astype("int64")
+    close = pd.to_numeric(df["close"], errors="coerce").replace(0, np.nan)
+    sent = pd.to_numeric(df.get("sentiment_final_mean", 0), errors="coerce").fillna(0.0)
+
+    if "log_return_1d" not in df.columns:
+        df["log_return_1d"] = np.log(close / close.groupby(df["ticker"]).shift(1))
+
+    df["log_return_2d"] = np.log(close / close.groupby(df["ticker"]).shift(2))
+
+    if "sentiment_delta_1d" not in df.columns:
+        df["sentiment_delta_1d"] = sent.groupby(df["ticker"]).diff()
+    ensure_cols(df, REAL_COLS, "[HYBRID features]")
+    for c in [*REAL_COLS, target_col]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        fill = 0.0 if pd.isna(df[c].median()) else float(df[c].median())
+        df[c] = df[c].fillna(fill).astype("float32")
+    return df.sort_values(["ticker", time_idx_col]).reset_index(drop=True)
+
+
+def build_datasets(df: pd.DataFrame, cfg: dict):
+    data_cfg = cfg["data"]
+    train_df, val_df = df[df["split"] == "train"].copy(), df[df["split"] == "val"].copy()
+    if train_df.empty or val_df.empty:
+        raise ValueError("Data train/val kosong. Periksa kolom split.")
+
+    encoder_length = int(data_cfg["max_encoder_length"])
+    prediction_length = int(data_cfg["max_prediction_length"])
+
+    base = dict(
+        time_idx=data_cfg["time_idx"],
+        target=data_cfg["target"],
+        group_ids=data_cfg["group_ids"],
+        min_encoder_length=encoder_length,
+        max_encoder_length=encoder_length,
+        min_prediction_length=prediction_length,
+        max_prediction_length=prediction_length,
         static_categoricals=["ticker"],
-        time_varying_known_categoricals=["month", "day_of_week"],
-        time_varying_known_reals=["time_idx", "is_month_end"],
-        time_varying_unknown_reals=[
-            "close", "volume", "log_return_1d", "vol_20", "rsi_14", 
-            "ma_5_div_ma_20", "bb_width_20", "gap_return_1d", "intraday_range_pct",
-            "has_news", "news_count_3d", 
-            "sentiment_mean_3d", "sentiment_ema_7d", "sentiment_ema_14d",
-            "sentiment_trend_7d", "sentiment_intraday_std", 
-            "sentiment_vol_impact", "high_news_day",
-            "sentiment_dir_signal" # <--- FITUR BARU WAJIB ADA
-        ],
-        target_normalizer=GroupNormalizer(groups=["ticker"], transformation="softplus"),
+        time_varying_known_categoricals=["day_of_week", "month", "is_month_end"],
+        time_varying_unknown_reals=REAL_COLS,
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
+        allow_missing_timesteps=True,
     )
+    training = TimeSeriesDataSet(train_df, **base)
+    validation = TimeSeriesDataSet.from_dataset(
+        training, val_df, predict=False, stop_randomization=True
+    )
+    return training, validation
 
-    # 3. Validation Set
-    validation = TimeSeriesDataSet.from_dataset(training, df, predict=True, stop_randomization=True)
-    
-    # Dataloaders
-    batch_size = config['training']['batch_size']
-    train_dataloader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
-    val_dataloader = validation.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
 
-    # 4. Model Setup (Hyperparameters dari Config baru)
-    tft = TemporalFusionTransformer.from_dataset(
-        training,
-        learning_rate=config['model']['learning_rate'],
-        hidden_size=config['model']['hidden_size'],
-        attention_head_size=config['model']['attention_head_size'],
-        dropout=config['model']['dropout'],
-        hidden_continuous_size=config['model']['hidden_continuous_size'],
-        output_size=7,
-        loss=QuantileLoss(),
-        log_interval=10,
-        reduce_on_plateau_patience=4,
-    )
+def fit_one(name: str, params: dict, training, validation, cfg: dict) -> dict:
+    model_cfg, trainer_cfg = cfg.get("model", {}), cfg.get("trainer", {})
+    out_dir = OUT_DIR / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = ModelCheckpoint(dirpath=str(out_dir), filename="best-checkpoint", monitor="val_loss", mode="min", save_top_k=1, auto_insert_metric_name=False)
+    early = EarlyStopping(monitor="val_loss", mode="min", patience=int(trainer_cfg.get("early_stopping_patience", 10)), min_delta=float(trainer_cfg.get("early_stopping_min_delta", 1e-4)), verbose=False)
+    trainer = pl.Trainer(max_epochs=int(trainer_cfg.get("max_epochs", 50)), accelerator="auto", devices=1 if torch.cuda.is_available() else "auto", gradient_clip_val=float(trainer_cfg.get("gradient_clip_val", 0.1)), callbacks=[early, ckpt], logger=False, enable_progress_bar=True, enable_model_summary=False)
+    train_loader = training.to_dataloader(train=True, batch_size=int(params["batch_size"]), num_workers=0)
+    val_loader = validation.to_dataloader(train=False, batch_size=max(1, int(params["batch_size"]) * 2), num_workers=0)
+    model = TemporalFusionTransformer.from_dataset(training, learning_rate=float(params["learning_rate"]), hidden_size=int(params["hidden_size"]), attention_head_size=int(model_cfg.get("attention_head_size", 4)), dropout=float(model_cfg.get("dropout", 0.3)), hidden_continuous_size=max(8, int(params["hidden_size"]) // 2), loss=QuantileLoss(), reduce_on_plateau_patience=4, optimizer="Adam", log_interval=10)
+    status, best_val_loss, best_path = "ok", np.nan, ""
+    try:
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        best_path = ckpt.best_model_path
+        if ckpt.best_model_score is not None:
+            best_val_loss = float(getattr(ckpt.best_model_score, "item", lambda: ckpt.best_model_score)())
+    except Exception as e:
+        status = f"error: {type(e).__name__}: {e}"
+    row = {"scenario": name, "learning_rate": float(params["learning_rate"]), "hidden_size": int(params["hidden_size"]), "batch_size": int(params["batch_size"]), "best_val_loss": best_val_loss, "best_model_path": best_path, "status": status}
+    (out_dir / "params.json").write_text(json.dumps(row, indent=2), encoding="utf-8")
+    return row
 
-    # 5. Trainer Setup
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=PROJECT_ROOT / "checkpoints" / "sentiment",
-        filename="tft-sentiment-{epoch:02d}-{val_loss:.2f}",
-        save_top_k=1,
-        monitor="val_loss",
-        mode="min"
-    )
-    
-    early_stop_callback = EarlyStopping(
-        monitor="val_loss",
-        min_delta=1e-4,
-        patience=config['training']['patience'],
-        verbose=False,
-        mode="min"
-    )
 
-    trainer = pl.Trainer(
-        max_epochs=config['training']['max_epochs'],
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=1,
-        enable_model_summary=True,
-        gradient_clip_val=config['training']['gradient_clip_val'],
-        callbacks=[checkpoint_callback, early_stop_callback],
-    )
+def main():
+    pl.seed_everything(42, workers=True)
+    cfg = load_cfg()
+    data_cfg = cfg["data"]
+    df = prepare_df(data_cfg["csv_path"], data_cfg["time_idx"], data_cfg["target"])
+    training, validation = build_datasets(df, cfg)
+    rows = [fit_one(name, params, training, validation, cfg) for name, params in cfg["scenarios"].items()]
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    result = pd.DataFrame(rows).sort_values(["best_val_loss", "scenario"], na_position="last")
+    result.to_csv(OUT_DIR / "hybrid_val_loss_results.csv", index=False)
+    print(result.to_string(index=False))
 
-    # 6. Start Training
-    print("\n" + "="*50)
-    print("   MEMULAI TRAINING SENTIMENT MODEL (TUNED)")
-    print("="*50)
-    trainer.fit(
-        tft,
-        train_dataloaders=train_dataloader,
-        val_dataloaders=val_dataloader,
-    )
-    
-    print(f"\nTraining Selesai. Model Tersimpan di: {checkpoint_callback.best_model_path}")
 
 if __name__ == "__main__":
     main()

@@ -1,236 +1,117 @@
 import os
-from typing import List, Dict, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import yaml
 
-# Lokasi root project
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DATA_RAW_PRICES_DIR = os.path.join(ROOT_DIR, "data", "raw", "prices")
-DATA_INTERIM_DIR = os.path.join(ROOT_DIR, "data", "interim")
-CONFIG_DATA_PATH = os.path.join(ROOT_DIR, "configs", "data.yaml")
-
-os.makedirs(DATA_INTERIM_DIR, exist_ok=True)
-
-RAW_MERGED_PATH = os.path.join(DATA_RAW_PRICES_DIR, "prices_all_raw.csv")
-OUT_PATH = os.path.join(DATA_INTERIM_DIR, "prices_with_indicators.csv")
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+RAW_PATH = os.path.join(ROOT_DIR, 'data', 'raw', 'prices', 'prices_all_raw.csv')
+OUT_PATH = os.path.join(ROOT_DIR, 'data', 'interim', 'prices_with_indicators.csv')
+CFG_PATH = os.path.join(ROOT_DIR, 'configs', 'data.yaml')
+KEEP_COLS = [
+    'ticker', 'date', 'close', 'volume', 'log_return_1d', 'vol_20', 'rsi_14',
+    'ma_5_div_ma_20', 'bb_width_20', 'gap_return_1d', 'intraday_range_pct',
+]
 
 
-def load_yaml(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def load_yaml(path: str) -> dict[str, Any]:
+    with open(path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f) or {}
 
 
-# ============================================================
-# HELPER: RSI
-# ============================================================
-def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-
-    gain = pd.Series(gain, index=series.index)
-    loss = pd.Series(loss, index=series.index)
-
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def parse_end_date(raw: Any):
+    if raw is None:
+        return None
+    dt = pd.to_datetime(raw, errors='coerce')
+    return None if pd.isna(dt) else dt.normalize()
 
 
-# ============================================================
-# BERSIHKAN RAW PRICES
-# ============================================================
-def clean_raw_prices(df: pd.DataFrame) -> pd.DataFrame:
-    if "date" not in df.columns:
+def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(period, min_periods=period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period, min_periods=period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def normalize_raw(df: pd.DataFrame) -> pd.DataFrame:
+    if 'date' not in df.columns:
         raise KeyError("Kolom 'date' tidak ditemukan di prices_all_raw.csv.")
-
-    # buang baris aneh (date NaN)
-    df = df[df["date"].notna()].copy()
-    df["date"] = pd.to_datetime(df["date"])
-
-    base_cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
-
-    # deteksi format WIDE
-    has_wide = any(any(col.startswith(base + ".") for base in base_cols) for col in df.columns)
-
-    if not has_wide:
-        # format long
-        for col in base_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df
-
-    # format wide -> gabung suffix
-    suffixes = ["", ".1", ".2", ".3", ".4", ".5"]
-    for col in base_cols:
-        base_series = pd.Series(np.nan, index=df.index)
-        for suf in suffixes:
-            col_name = col if suf == "" else col + suf
-            if col_name in df.columns:
-                base_series = base_series.where(~base_series.isna(), df[col_name])
-        df[col] = pd.to_numeric(base_series, errors="coerce")
-
-    # drop kolom wide sisa
-    drop_cols = []
-    for c in df.columns:
-        for base in base_cols:
-            if c.startswith(base + "."):
-                drop_cols.append(c)
-                break
-    if drop_cols:
-        df = df.drop(columns=drop_cols)
-
-    return df
+    df = df[df['date'].notna()].copy()
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    base_cols = ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']
+    suffixes = ['', '.1', '.2', '.3', '.4', '.5']
+    for base in base_cols:
+        cols = [base + s for s in suffixes if base + s in df.columns]
+        if cols:
+            ser = pd.Series(np.nan, index=df.index)
+            for c in cols:
+                ser = ser.where(~ser.isna(), pd.to_numeric(df[c], errors='coerce'))
+            df[base] = ser
+    if 'ticker' not in df.columns:
+        raise KeyError("Kolom 'ticker' tidak ditemukan pada raw merged.")
+    df['ticker'] = df['ticker'].astype(str).str.upper()
+    return df.sort_values(['ticker', 'date']).drop_duplicates(['ticker', 'date'])
 
 
-# ============================================================
-# FILTER TRADING DAYS + KALENDER INTERSECTION
-# ============================================================
-def drop_non_trading_rows(df: pd.DataFrame) -> pd.DataFrame:
-    # definisi non-trading: volume <= 0 atau NaN
-    df = df.copy()
-    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
-    df = df[df["Volume"].notna() & (df["Volume"] > 0)].copy()
-    return df
+def apply_filters(df: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+    for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    allowed = {str(t).strip().upper() for t in tickers if str(t).strip()}
+    if allowed:
+        df = df[df['ticker'].isin(allowed)].copy()
+    df = df[df['Volume'].fillna(0) > 0].copy()
+    return df.sort_values(['ticker', 'date']).copy()
 
 
-def apply_intersection_calendar(df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
-    # ambil tanggal yang ada di semua ticker
-    sets = []
-    for t in tickers:
-        d = df.loc[df["ticker"] == t, "date"].dropna().drop_duplicates()
-        sets.append(set(d.tolist()))
-    common = set.intersection(*sets) if sets else set()
-    df = df[df["date"].isin(common)].copy()
-    return df
-
-
-# ============================================================
-# HITUNG INDIKATOR TEKNIKAL (MINIMAL FINAL)
-# ============================================================
-def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.sort_values(["ticker", "date"]).copy()
-
-    rename_map = {
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Adj Close": "adj_close",
-        "Volume": "volume",
-    }
-    df.rename(columns=rename_map, inplace=True)
-
-    required = ["ticker", "date", "open", "high", "low", "close", "volume"]
-    for c in required:
-        if c not in df.columns:
-            raise KeyError(f"Kolom '{c}' tidak ditemukan. Cek file raw merged Anda.")
-
-    # pastikan numerik
-    for c in ["open", "high", "low", "close", "volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    out = []
     eps = 1e-8
-    out_list: List[pd.DataFrame] = []
-
-    for ticker, g in df.groupby("ticker"):
-        g = g.sort_values("date").copy()
-
-        prev_close = g["close"].shift(1)
-
-        # log return
-        g["log_return_1d"] = np.log(g["close"] / prev_close)
-
-        # vol 20 dari log_return
-        g["vol_20"] = g["log_return_1d"].rolling(window=20, min_periods=20).std()
-
-        # MA ratio
-        ma_5 = g["close"].rolling(window=5, min_periods=5).mean()
-        ma_20 = g["close"].rolling(window=20, min_periods=20).mean()
-        g["ma_5_div_ma_20"] = ma_5 / (ma_20 + eps)
-
-        # RSI 14
-        g["rsi_14"] = compute_rsi(g["close"], period=14)
-
-        # Bollinger width
-        close_std_20 = g["close"].rolling(window=20, min_periods=20).std()
-        bb_upper = ma_20 + 2 * close_std_20
-        bb_lower = ma_20 - 2 * close_std_20
-        g["bb_width_20"] = (bb_upper - bb_lower) / (ma_20 + eps)
-
-        # Intraday range (%)
-        g["intraday_range_pct"] = (g["high"] - g["low"]) / (g["close"] + eps)
-
-        # Gap return (overnight)
-        g["gap_return_1d"] = np.log(g["open"] / (prev_close + eps))
-
-        out_list.append(g)
-
-    df_ind = pd.concat(out_list, ignore_index=True)
-
-    # keep minimal cols (sesuai dataset final)
-    keep = [
-        "ticker", "date",
-        "close", "volume",
-        "log_return_1d", "vol_20",
-        "rsi_14", "ma_5_div_ma_20", "bb_width_20",
-        "gap_return_1d", "intraday_range_pct",
-    ]
-    df_ind = df_ind[keep].copy()
-
-    # drop warm-up rows yang masih NaN (penting untuk training stabil)
-    df_ind = df_ind.dropna(subset=[
-        "log_return_1d", "vol_20", "rsi_14", "ma_5_div_ma_20", "bb_width_20",
-        "gap_return_1d", "intraday_range_pct"
-    ])
-
-    return df_ind
+    for ticker, g in df.groupby('ticker', sort=True):
+        g = g.sort_values('date').copy()
+        g = g.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+        prev_close = g['close'].shift(1)
+        ma5 = g['close'].rolling(5, min_periods=5).mean()
+        ma20 = g['close'].rolling(20, min_periods=20).mean()
+        std20 = g['close'].rolling(20, min_periods=20).std()
+        g['log_return_1d'] = np.log(g['close'] / prev_close.replace(0, np.nan))
+        g['vol_20'] = g['log_return_1d'].rolling(20, min_periods=20).std()
+        g['rsi_14'] = compute_rsi(g['close'], 14)
+        g['ma_5_div_ma_20'] = ma5 / (ma20 + eps)
+        g['bb_width_20'] = ((ma20 + 2 * std20) - (ma20 - 2 * std20)) / (ma20 + eps)
+        g['gap_return_1d'] = np.log(g['open'] / prev_close.replace(0, np.nan))
+        g['intraday_range_pct'] = (g['high'] - g['low']) / (g['close'] + eps)
+        out.append(g[KEEP_COLS])
+    result = pd.concat(out, ignore_index=True)
+    need = [c for c in KEEP_COLS if c not in {'ticker', 'date', 'close', 'volume'}]
+    return result.dropna(subset=need).sort_values(['ticker', 'date']).reset_index(drop=True)
 
 
 def main():
-    if not os.path.exists(RAW_MERGED_PATH):
-        raise FileNotFoundError(f"File harga gabungan tidak ditemukan: {RAW_MERGED_PATH}")
+    if not os.path.exists(RAW_PATH):
+        raise FileNotFoundError(f'File tidak ditemukan: {RAW_PATH}')
+    cfg = load_yaml(CFG_PATH)
+    tickers = list(cfg.get('tickers', []))
+    raw = normalize_raw(pd.read_csv(RAW_PATH))
+    end_date = parse_end_date(cfg.get('end_date'))
+    if end_date is not None:
+        raw = raw[raw['date'] <= end_date].copy()
+    filt = apply_filters(raw, tickers)
+    result = add_indicators(filt)
 
-    cfg = load_yaml(CONFIG_DATA_PATH)
-    tickers_cfg = cfg.get("tickers", None)
+    forbidden = {'BBCA.JK', 'UNVR.JK'} & set(result['ticker'].astype(str).str.upper().unique())
+    if forbidden:
+        raise ValueError(f'Ticker terlarang masih ada di prices_with_indicators.csv: {sorted(forbidden)}')
 
-    print(f"[INFO] Loading raw prices from {RAW_MERGED_PATH}")
-    df_raw = pd.read_csv(RAW_MERGED_PATH)
-
-    df_clean = clean_raw_prices(df_raw)
-
-    if "ticker" not in df_clean.columns:
-        raise KeyError("Kolom 'ticker' tidak ditemukan pada raw merged. Pastikan pipeline download/merge menambahkannya.")
-
-    # filter tickers jika ada di config
-    if tickers_cfg:
-        df_clean = df_clean[df_clean["ticker"].isin(tickers_cfg)].copy()
-
-    tickers_final = sorted(df_clean["ticker"].dropna().unique().tolist())
-    if not tickers_final:
-        raise ValueError("Tidak ada ticker tersisa setelah filter.")
-
-    # 1) drop non-trading/sintetis
-    df_clean = drop_non_trading_rows(df_clean)
-
-    # 2) intersection calendar supaya panel konsisten
-    df_clean = apply_intersection_calendar(df_clean, tickers_final)
-
-    # 3) hitung indikator pada trading-days only + panel konsisten
-    df_ind = add_technical_indicators(df_clean)
-
-    print("[INFO] Kolom yang disimpan di prices_with_indicators.csv:")
-    print(df_ind.columns.tolist())
-
-    print("\n[INFO] Shape akhir:", df_ind.shape)
-    print(f"[INFO] Saving prices with indicators to {OUT_PATH}")
-    df_ind.to_csv(OUT_PATH, index=False)
-    print("[INFO] Done.")
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    result.to_csv(OUT_PATH, index=False)
+    print('[INFO] Kolom yang disimpan di prices_with_indicators.csv:')
+    print(result.columns.tolist())
+    print(f'\n[INFO] Shape akhir: {result.shape}')
+    print(f'[INFO] Saving prices with indicators to {OUT_PATH}')
+    print('[INFO] Done.')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

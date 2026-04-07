@@ -1,42 +1,40 @@
-# --- AGGRESSIVE TUNING FOR LOW RMSE (FIXED BATCH_SIZE) ---
-
 data:
-  dataset_path: "data/processed/tft_master.csv"
-  target: "close"
-  time_idx: "time_idx"
-  group_ids: ["ticker"]
-  
-  # Tetap Multi-Horizon (3 Hari)
+  csv_path: "D:/skripsi/tft/data/processed/tft_master.csv"
+  max_encoder_length: 15
   max_prediction_length: 3
-  
-  # Encoder dipendekkan (30 hari) agar model lebih responsif
-  max_encoder_length: 30  
-  min_encoder_length: 30
+  group_ids: ["ticker"]
+  time_idx: "time_idx"
+  target: "close"
 
 model:
-  # Learning rate dikecilkan sedikit
-  learning_rate: 0.0005
-  
-  # KAPASITAS OTAK DINAIKKAN (64 -> 128)
-  hidden_size: 128
-  
-  # Attention Heads dinaikkan
+  dropout: 0.3
   attention_head_size: 4
-  
-  # Dropout DITURUNKAN (0.05) agar berani menghafal
-  dropout: 0.05
-  
-  hidden_continuous_size: 16
-  output_size: 7
-  log_interval: 10
-  reduce_on_plateau_patience: 5
 
-training:
-  # --- PINDAHKAN BATCH SIZE KE SINI ---
-  batch_size: 32
-  
-  max_epochs: 50
-  patience: 15
-  accelerator: "gpu"
-  devices: 1
-  gradient_clip_val: 0.1
+scenarios:
+  S1:  { learning_rate: 0.0002, hidden_size: 64,  batch_size: 32 }
+  S2:  { learning_rate: 0.0002, hidden_size: 64,  batch_size: 64 }
+  S3:  { learning_rate: 0.0002, hidden_size: 64,  batch_size: 128 }
+  S4:  { learning_rate: 0.0002, hidden_size: 96,  batch_size: 32 }
+  S5:  { learning_rate: 0.0002, hidden_size: 96,  batch_size: 64 }
+  S6:  { learning_rate: 0.0002, hidden_size: 96,  batch_size: 128 }
+  S7:  { learning_rate: 0.0002, hidden_size: 128, batch_size: 32 }
+  S8:  { learning_rate: 0.0002, hidden_size: 128, batch_size: 64 }
+  S9:  { learning_rate: 0.0002, hidden_size: 128, batch_size: 128 }
+  S10: { learning_rate: 0.0005, hidden_size: 64,  batch_size: 32 }
+  S11: { learning_rate: 0.0005, hidden_size: 64,  batch_size: 64 }
+  S12: { learning_rate: 0.0005, hidden_size: 64,  batch_size: 128 }
+  S13: { learning_rate: 0.0005, hidden_size: 96,  batch_size: 32 }
+  S14: { learning_rate: 0.0005, hidden_size: 96,  batch_size: 64 }
+  S15: { learning_rate: 0.0005, hidden_size: 96,  batch_size: 128 }
+  S16: { learning_rate: 0.0005, hidden_size: 128, batch_size: 32 }
+  S17: { learning_rate: 0.0005, hidden_size: 128, batch_size: 64 }
+  S18: { learning_rate: 0.0005, hidden_size: 128, batch_size: 128 }
+  S19: { learning_rate: 0.0007, hidden_size: 64,  batch_size: 32 }
+  S20: { learning_rate: 0.0007, hidden_size: 64,  batch_size: 64 }
+  S21: { learning_rate: 0.0007, hidden_size: 64,  batch_size: 128 }
+  S22: { learning_rate: 0.0007, hidden_size: 96,  batch_size: 32 }
+  S23: { learning_rate: 0.0007, hidden_size: 96,  batch_size: 64 }
+  S24: { learning_rate: 0.0007, hidden_size: 96,  batch_size: 128 }
+  S25: { learning_rate: 0.0007, hidden_size: 128, batch_size: 32 }
+  S26: { learning_rate: 0.0007, hidden_size: 128, batch_size: 64 }
+  S27: { learning_rate: 0.0007, hidden_size: 128, batch_size: 128 }

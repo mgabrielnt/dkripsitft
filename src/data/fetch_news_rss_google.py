@@ -1,323 +1,254 @@
-"""
-fetch_news_rss_google.py
-
-Fitur Utama:
-- SMART RESUME: Otomatis mendeteksi tanggal terakhir di CSV dan hanya mengambil data baru.
-- HISTORICAL SCRAPING: Mengambil berita Google News per bulan.
-- DIRECT RSS: Mengambil feed RSS umum.
-- Rate Limit Protection: Ada jeda waktu (sleep).
-"""
-
 import os
-import time
 import random
+import time
 import urllib.parse
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
+from typing import Any
 
 import feedparser
 import pandas as pd
 import yaml
 
-# ---------------------------------------------------------------------------
-# PATH SETUP
-# ---------------------------------------------------------------------------
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DATA_RAW_NEWS_DIR = os.path.join(ROOT_DIR, "data", "raw", "news")
-os.makedirs(DATA_RAW_NEWS_DIR, exist_ok=True)
+CFG_PATH = os.path.join(ROOT_DIR, "configs", "rss.yaml")
+DATA_CFG_PATH = os.path.join(ROOT_DIR, "configs", "data.yaml")
+OUT_PATH = os.path.join(ROOT_DIR, "data", "raw", "news", "news_raw_all_sources.csv")
 
-CONFIG_RSS_PATH = os.path.join(ROOT_DIR, "configs", "rss.yaml")
-OUT_PATH = os.path.join(DATA_RAW_NEWS_DIR, "news_raw_all_sources.csv")
+BASE_COLS = ["date", "ticker", "language", "title", "description", "link", "source"]
 
 
-# ---------------------------------------------------------------------------
-# HELPER FUNCTIONS
-# ---------------------------------------------------------------------------
-
-def load_config(path: str) -> Dict[str, Any]:
+def load_yaml(path: str) -> dict[str, Any]:
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Config tidak ditemukan: {path}")
+        return {}
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-def get_last_date_from_csv(csv_path: str, ticker: str) -> Optional[datetime.date]:
-    """
-    Cek tanggal terakhir untuk ticker tertentu di file CSV yang sudah ada.
-    """
-    if not os.path.exists(csv_path):
+
+def get_allowed_tickers(data_cfg: dict[str, Any]) -> set[str]:
+    return {
+        str(t).strip().upper()
+        for t in data_cfg.get("tickers", [])
+        if str(t).strip()
+    }
+
+
+def to_date(raw: Any) -> date | None:
+    if raw is None:
         return None
-    
     try:
-        # Baca hanya kolom ticker dan date untuk efisiensi
-        df = pd.read_csv(csv_path, usecols=["ticker", "date"])
-        df = df[df["ticker"] == ticker]
-        
-        if df.empty:
-            return None
-            
-        df["date"] = pd.to_datetime(df["date"])
-        last_date = df["date"].max().date()
-        return last_date
-    except Exception as e:
-        print(f"[WARN] Gagal membaca last date dari CSV: {e}")
+        dt = pd.to_datetime(raw, errors="coerce")
+        return None if pd.isna(dt) else dt.date()
+    except Exception:
         return None
 
-def parse_published(entry: feedparser.FeedParserDict) -> Optional[datetime.date]:
-    """Mencoba parsing tanggal dari format RSS yang berantakan."""
-    # Coba field parsed bawaan feedparser
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-    if parsed:
-        try:
-            return datetime(*parsed[:6]).date()
-        except Exception:
-            pass
 
-    # Coba parsing string manual
-    pub_str = entry.get("published") or entry.get("pubDate")
-    if pub_str:
-        from email.utils import parsedate_to_datetime
+def parse_published(entry: Any) -> date | None:
+    for key in ("published", "updated"):
+        raw = entry.get(key)
+        if not raw:
+            continue
         try:
-            return parsedate_to_datetime(pub_str).date()
+            return parsedate_to_datetime(raw).date()
         except Exception:
-            return None
+            dt = pd.to_datetime(raw, errors="coerce")
+            if not pd.isna(dt):
+                return dt.date()
     return None
 
-def build_google_news_rss_url(query: str, language: str = "id") -> str:
-    base_url = "https://news.google.com/rss/search"
-    lang_lower = (language or "id").lower()
 
-    if lang_lower == "id":
-        hl, gl, ceid = "id-ID", "ID", "ID:id"
-    elif lang_lower == "en":
-        hl, gl, ceid = "en-US", "US", "US:en"
-    else:
-        hl, gl, ceid = f"{lang_lower}-ID", "ID", f"ID:{lang_lower}"
-
-    params = {"q": query, "hl": hl, "gl": gl, "ceid": ceid}
-    return base_url + "?" + urllib.parse.urlencode(params)
+def read_existing_output(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=BASE_COLS)
+    try:
+        return pd.read_csv(path).reindex(columns=BASE_COLS)
+    except Exception:
+        return pd.DataFrame(columns=BASE_COLS)
 
 
-# ---------------------------------------------------------------------------
-# CORE LOGIC: ITERATIVE FETCHING (HISTORICAL GOOGLE NEWS)
-# ---------------------------------------------------------------------------
+def last_saved_date(path: str, ticker: str) -> date | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path, usecols=["ticker", "date"])
+        df = df[df["ticker"].astype(str).str.upper() == ticker.upper()]
+        if df.empty:
+            return None
+        dt = pd.to_datetime(df["date"], errors="coerce").max()
+        return None if pd.isna(dt) else dt.date()
+    except Exception:
+        return None
 
-def fetch_google_history(
-    query: str,
+
+def google_url(query: str, language: str) -> str:
+    hl = f"{language}-ID" if language == "id" else language
+    params = {
+        "q": query,
+        "hl": hl,
+        "gl": "ID",
+        "ceid": f"ID:{language}",
+        "output": "rss",
+    }
+    return "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
+
+
+def make_row(
+    published: date,
     ticker: str,
     language: str,
-    start_date: datetime,
-    max_articles_per_query: Optional[int] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Ambil arsip Google News bulanan.
-    """
-    end_dt = datetime.now()
-    
-    # Jika start date sudah lewat hari ini (misal baru run pagi tadi), skip
-    if start_date.date() >= end_dt.date():
-        print(f"[SKIP] Data {ticker} sudah up-to-date ({start_date.date()}).")
-        return []
-
-    print(f"\n[START] Fetching Google History untuk {ticker}")
-    print(f"      Query : {query}")
-    print(f"      Range : {start_date.date()} s.d. {end_dt.date()}")
-
-    # Rentang waktu per bulan (Monthly Start)
-    # Gunakan period 'M' agar mencakup sisa bulan ini
-    date_ranges = pd.date_range(start=start_date, end=end_dt, freq="MS")
-    
-    # Jika range kosong (misal baru beda beberapa hari), paksa loop sekali
-    if len(date_ranges) == 0:
-        date_ranges = pd.DatetimeIndex([start_date])
-
-    all_records: List[Dict[str, Any]] = []
-
-    # Loop logic yang aman
-    current_cursor = start_date
-    
-    while current_cursor < end_dt:
-        # Set next cursor ke awal bulan depan, atau hari ini jika sudah lewat
-        next_month = (current_cursor.replace(day=1) + timedelta(days=32)).replace(day=1)
-        next_cursor = min(next_month, end_dt)
-        
-        curr_start_str = current_cursor.strftime("%Y-%m-%d")
-        curr_end_str = next_cursor.strftime("%Y-%m-%d")
-
-        # Tambahkan filter waktu ke query:
-        period_query = f"{query} after:{curr_start_str} before:{curr_end_str}"
-        url = build_google_news_rss_url(period_query, language=language)
-
-        try:
-            feed = feedparser.parse(url)
-            entries = feed.entries
-
-            if entries:
-                print(f"    -> [{curr_start_str} s/d {curr_end_str}] : {len(entries)} artikel.")
-                for entry in entries:
-                    date_obj = parse_published(entry)
-                    if not date_obj: continue
-
-                    link = entry.get("link", "")
-                    if any(r["link"] == link for r in all_records): continue
-
-                    all_records.append({
-                        "date": date_obj,
-                        "ticker": ticker,
-                        "query": query,
-                        "query_type": "google_history",
-                        "language": language,
-                        "title": entry.get("title", ""),
-                        "description": entry.get("summary", ""),
-                        "link": link,
-                        "source": entry.get("source", {}).get("title", "GoogleNews"),
-                        "published_raw": str(date_obj),
-                    })
-
-                    if max_articles_per_query and len(all_records) >= max_articles_per_query:
-                        break
-            else:
-                pass # Silent if empty
-
-        except Exception as e:
-            print(f"    [ERROR] Periode {curr_start_str} : {e}")
-
-        if max_articles_per_query and len(all_records) >= max_articles_per_query:
-            print(f"    [INFO] Mencapai limit {max_articles_per_query} artikel.")
-            break
-
-        # Move cursor
-        current_cursor = next_cursor
-        
-        # Sleep acak
-        time.sleep(random.uniform(2.0, 4.0))
-
-    print(f"[DONE] Total terkumpul untuk {ticker}: {len(all_records)} artikel.\n")
-    return all_records
+    title: str,
+    description: str,
+    link: str,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "date": published,
+        "ticker": ticker,
+        "language": language,
+        "title": title,
+        "description": description,
+        "link": link,
+        "source": source,
+    }
 
 
-# ---------------------------------------------------------------------------
-# CORE LOGIC: DIRECT RSS
-# ---------------------------------------------------------------------------
+def fetch_google(query: str, ticker: str, language: str, start: date, end: date, limit: int | None):
+    rows, seen = [], set()
+    cursor = start
 
-def fetch_rss_direct(rss_url: str, ticker: str, source_name: str) -> List[Dict[str, Any]]:
-    ticker = (ticker or "UNKNOWN").upper()
-    print(f"[INFO] Fetching RSS Direct: {source_name} (ticker={ticker})")
-    try:
-        feed = feedparser.parse(rss_url)
-        records: List[Dict[str, Any]] = []
-        for entry in feed.entries:
-            date_obj = parse_published(entry)
-            if not date_obj: continue
-            records.append({
-                "date": date_obj,
-                "ticker": ticker,
-                "query": rss_url,
-                "query_type": "rss_direct",
-                "language": "id",
-                "title": entry.get("title", ""),
-                "description": entry.get("summary", ""),
-                "link": entry.get("link", ""),
-                "source": source_name,
-                "published_raw": str(date_obj),
-            })
-        print(f"      -> Dapat {len(records)} artikel.")
-        return records
-    except Exception as e:
-        print(f"      [ERROR] RSS Direct gagal: {e}")
-        return []
+    while cursor <= end and (limit is None or len(rows) < limit):
+        nxt = min(cursor + timedelta(days=31), end + timedelta(days=1))
+        q = f"{query} after:{cursor.isoformat()} before:{nxt.isoformat()}"
+        feed = feedparser.parse(google_url(q, language))
+
+        for entry in getattr(feed, "entries", []):
+            published = parse_published(entry)
+            link = str(entry.get("link", "")).strip()
+            if not published or not link or link in seen:
+                continue
+
+            rows.append(
+                make_row(
+                    published=published,
+                    ticker=ticker,
+                    language=language,
+                    title=entry.get("title", ""),
+                    description=entry.get("summary", ""),
+                    link=link,
+                    source=entry.get("source", {}).get("title", "GoogleNews"),
+                )
+            )
+            seen.add(link)
+
+            if limit is not None and len(rows) >= limit:
+                break
+
+        cursor = nxt
+        time.sleep(random.uniform(1.2, 2.2))
+
+    return rows
 
 
-# ---------------------------------------------------------------------------
-# MAIN PROGRAM
-# ---------------------------------------------------------------------------
+def fetch_direct(url: str, ticker: str, source_name: str, language: str):
+    rows = []
+    feed = feedparser.parse(url)
+
+    for entry in getattr(feed, "entries", []):
+        published = parse_published(entry)
+        link = str(entry.get("link", "")).strip()
+        if not published or not link:
+            continue
+
+        rows.append(
+            make_row(
+                published=published,
+                ticker=ticker,
+                language=language,
+                title=entry.get("title", ""),
+                description=entry.get("summary", ""),
+                link=link,
+                source=source_name,
+            )
+        )
+
+    return rows
+
 
 def main():
-    config = load_config(CONFIG_RSS_PATH)
-    
-    # Config Defaults
-    default_start_str = config.get("start_date_history", "2020-01-01")
-    default_language = config.get("default_language", "id")
-    max_articles = config.get("max_articles_per_query", None)
-    if isinstance(max_articles, str) and not max_articles.strip(): max_articles = None
+    cfg = load_yaml(CFG_PATH)
+    data_cfg = load_yaml(DATA_CFG_PATH)
+    allowed_tickers = get_allowed_tickers(data_cfg)
+    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
 
-    queries = config.get("queries", [])
-    final_data: List[Dict[str, Any]] = []
+    default_start = to_date(cfg.get("start_date_history", data_cfg.get("start_date", "2017-01-01")))
+    default_lang = str(cfg.get("default_language", "id"))
+    max_articles = cfg.get("max_articles_per_query")
+    today = to_date(data_cfg.get("end_date")) or datetime.now().date()
+
+    all_rows = []
 
     print("===================================================")
     print("      SMART NEWS SCRAPING (AUTO-RESUME)")
     print("===================================================")
+    print(f"[INFO] Rentang pengambilan: {default_start} s.d. {today}")
 
-    for q in queries:
-        q_type = q.get("type")
-        ticker = (q.get("ticker") or "UNKNOWN").upper()
+    for q in cfg.get("queries", []):
+        qtype = str(q.get("type", "")).lower()
+        ticker = str(q.get("ticker", "UNKNOWN")).upper()
+        lang = str(q.get("language", default_lang))
 
-        if q_type == "google":
-            query_text = q.get("query")
-            lang = q.get("language", default_language)
-            
-            # --- SMART RESUME LOGIC ---
-            last_recorded_date = get_last_date_from_csv(OUT_PATH, ticker)
-            
-            if last_recorded_date:
-                # Lanjut H+1 dari data terakhir
-                start_fetch_dt = datetime.combine(last_recorded_date, datetime.min.time()) + timedelta(days=1)
-                print(f"Detected existing data for {ticker}. Resuming from {start_fetch_dt.date()}...")
-            else:
-                # Mulai dari awal (Config)
-                try:
-                    start_fetch_dt = datetime.strptime(str(default_start_str), "%Y-%m-%d")
-                except:
-                    start_fetch_dt = datetime(2020, 1, 1)
-                print(f"No existing data for {ticker}. Starting fresh from {start_fetch_dt.date()}...")
-            
-            # Fetch
-            recs = fetch_google_history(
-                query=query_text,
-                ticker=ticker,
-                language=lang,
-                start_date=start_fetch_dt,
-                max_articles_per_query=max_articles,
-            )
-            final_data.extend(recs)
+        if allowed_tickers and ticker not in allowed_tickers:
+            print(f"[SKIP] {ticker}: tidak ada di data.yaml.")
+            continue
 
-        elif q_type == "rss":
-            # RSS Direct selalu fetch karena isinya real-time/latest
-            url = q.get("rss_url")
-            src = q.get("source_name", "RSS")
-            recs = fetch_rss_direct(url, ticker, src)
-            final_data.extend(recs)
+        if qtype == "google":
+            last_dt = last_saved_date(OUT_PATH, ticker)
+            start = max(default_start, last_dt + timedelta(days=1)) if last_dt else default_start
+            if start > today:
+                print(f"[SKIP] {ticker}: tidak ada periode baru.")
+                continue
 
-    # --- SAVE PROCESS ---
-    if not final_data:
-        print("\n[INFO] Tidak ada berita BARU yang ditemukan (Data sudah up-to-date).")
-        return
+            rows = fetch_google(str(q.get("query", "")), ticker, lang, start, today, max_articles)
+            print(f"[INFO] {ticker} google_history -> {len(rows)} artikel baru")
+            all_rows.extend(rows)
 
-    df_new = pd.DataFrame(final_data)
-    df_new["date"] = pd.to_datetime(df_new["date"]).dt.date
+        elif qtype == "rss":
+            rows = fetch_direct(str(q.get("url", "")), ticker, str(q.get("source", "RSS")), lang)
+            print(f"[INFO] {ticker} rss_direct -> {len(rows)} artikel")
+            all_rows.extend(rows)
 
-    if os.path.exists(OUT_PATH):
-        print(f"\n[INFO] Menambahkan {len(df_new)} berita baru ke database lama...")
-        df_old = pd.read_csv(OUT_PATH)
-        df_old["date"] = pd.to_datetime(df_old["date"]).dt.date
-        df_combined = pd.concat([df_old, df_new], ignore_index=True)
-    else:
-        df_combined = df_new
+    old = read_existing_output(OUT_PATH)
+    if not old.empty:
+        old["ticker"] = old["ticker"].astype(str).str.upper()
+        if allowed_tickers:
+            old = old[old["ticker"].isin(allowed_tickers)].copy()
 
-    # Deduplikasi Final (Link + Ticker)
-    before_dedupe = len(df_combined)
-    df_combined = df_combined.drop_duplicates(subset=["link", "ticker"], keep="last")
-    after_dedupe = len(df_combined)
+    new = pd.DataFrame(all_rows).reindex(columns=BASE_COLS)
+    out = pd.concat([old, new], ignore_index=True).reindex(columns=BASE_COLS)
 
-    # Sorting
-    df_combined = df_combined.sort_values(by=["ticker", "date"]).reset_index(drop=True)
+    if not out.empty:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+        out["ticker"] = out["ticker"].astype(str).str.upper()
+        out["language"] = out["language"].fillna("").astype(str).str.lower()
+        out["title"] = out["title"].fillna("").astype(str)
+        out["description"] = out["description"].fillna("").astype(str)
+        out["link"] = out["link"].astype(str).str.strip()
+        out["source"] = out["source"].fillna("").astype(str)
 
-    print(f"\n[INFO] Statistik Data:")
-    print(f"      Total baris (sebelum dedupe) : {before_dedupe}")
-    print(f"      Total baris (setelah dedupe) : {after_dedupe}")
-    print(f"      Data baru yang tersimpan   : {after_dedupe - (len(df_old) if 'df_old' in locals() else 0)}")
+        out = out.dropna(subset=["date", "ticker", "link"])
+        out = out[out["date"] <= today]
+        if allowed_tickers:
+            out = out[out["ticker"].isin(allowed_tickers)].copy()
+        out = out.drop_duplicates(subset=["ticker", "link", "date"], keep="last")
+        out = out.sort_values(["ticker", "date", "link"]).reset_index(drop=True)
+        out = out.reindex(columns=BASE_COLS)
 
-    df_combined.to_csv(OUT_PATH, index=False)
-    print(f"[SUCCESS] Database diperbarui: {OUT_PATH}")
+    out.to_csv(OUT_PATH, index=False)
+    print(f"[INFO] Total rows tersimpan: {len(out)}")
+    print(f"[INFO] Saving to: {OUT_PATH}")
+    print("[INFO] Kolom final:", ",".join(out.columns.tolist()))
+    print("[INFO] Done.")
+
 
 if __name__ == "__main__":
     main()

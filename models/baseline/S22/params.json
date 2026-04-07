@@ -1,0 +1,9 @@
+{
+  "scenario": "S22",
+  "learning_rate": 0.0007,
+  "hidden_size": 96,
+  "batch_size": 32,
+  "best_val_loss": 56.75568771362305,
+  "best_model_path": "D:\\skripsi\\tft\\models\\baseline\\S22\\best-checkpoint.ckpt",
+  "status": "ok"
+}

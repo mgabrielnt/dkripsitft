@@ -25,6 +25,5 @@ python -m src.data.build_tft_master_dataset
 python -m src.models.train_tft_baseline
 python -m src.models.train_tft_with_sentiment
 
-python -m src.models.evaluate_results  
-python -m src.analysis.compute_vif_features
+python -m src.models.evaluate_results
 python -m streamlit run src/dashboard/app.py      

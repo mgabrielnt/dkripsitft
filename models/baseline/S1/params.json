@@ -1,0 +1,9 @@
+{
+  "scenario": "S1",
+  "learning_rate": 0.0002,
+  "hidden_size": 64,
+  "batch_size": 32,
+  "best_val_loss": 49.8732795715332,
+  "best_model_path": "D:\\skripsi\\tft\\models\\baseline\\S1\\best-checkpoint-v4.ckpt",
+  "status": "ok"
+}
