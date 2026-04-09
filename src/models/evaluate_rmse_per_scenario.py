@@ -4,10 +4,10 @@ import numpy as np
 import pandas as pd
 import torch
 
-BASELINE_DIR = r"D:/skripsi/tft/models/baseline"
-HYBRID_DIR = r"D:/skripsi/tft/models/hybrid"
-BASELINE_OUT = r"D:/skripsi/tft/models/baseline/baseline_vallos.csv"
-HYBRID_OUT = r"D:/skripsi/tft/models/hybrid/hybrid_vallos.csv"
+BASELINE_DIR = r"D:/skripsi/tft/modelssss/baseline"
+HYBRID_DIR = r"D:/skripsi/tft/modelssss/hybrid"
+BASELINE_OUT = r"D:/skripsi/tft/modelssss/baseline/baseline_vallos.csv"
+HYBRID_OUT = r"D:/skripsi/tft/modelssss/hybrid/hybrid_vallos.csv"
 DEBUG_ONE_ONLY = False
 
 

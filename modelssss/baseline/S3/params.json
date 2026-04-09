@@ -1,0 +1,9 @@
+{
+  "scenario": "S3",
+  "learning_rate": 0.0002,
+  "hidden_size": 64,
+  "batch_size": 128,
+  "best_val_loss": 51.78628921508789,
+  "best_model_path": "D:\\skripsi\\tft\\modelssss\\baseline\\S3\\best-checkpoint.ckpt",
+  "status": "ok"
+}

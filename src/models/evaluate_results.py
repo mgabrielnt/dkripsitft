@@ -10,11 +10,11 @@ except ImportError:
 DATA_PATH = r"D:/skripsi/tft/data/processed/tft_master.csv"
 REPORT_DIR = Path(r"D:/skripsi/tft/reportss")
 FIG_DIR = REPORT_DIR / "figures"
-DIRACC_EPS = 5.0
-BASELINE_SCENARIO = "S24"
-HYBRID_SCENARIO = "S8"
-BASELINE_CKPT = rf"D:/skripsi/tft/models/baseline/{BASELINE_SCENARIO}/best-checkpoint.ckpt"
-HYBRID_CKPT = rf"D:/skripsi/tft/models/hybrid/{HYBRID_SCENARIO}/best-checkpoint.ckpt"
+DIRACC_EPS = 15.0
+BASELINE_SCENARIO = "S5"
+HYBRID_SCENARIO = "S1"
+BASELINE_CKPT = rf"D:/skripsi/tft/modelssss/baseline/{BASELINE_SCENARIO}/best-checkpoint.ckpt"
+HYBRID_CKPT = rf"D:/skripsi/tft/modelssss/hybrid/{HYBRID_SCENARIO}/best-checkpoint.ckpt"
 EVAL_SPLIT, BASE_BATCH_SIZE, HYBRID_BATCH_SIZE = "TESTING", 128, 128
 
 def _title_split():
