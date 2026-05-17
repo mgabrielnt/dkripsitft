@@ -7,7 +7,7 @@
 # ==============================================================================
 
 default_language: "id"
-start_date_history: "2017-01-01"
+start_date_history: "2017-01-02"
 max_articles_per_query: null
 
 queries:
