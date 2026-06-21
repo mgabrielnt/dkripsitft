@@ -19,7 +19,6 @@ except Exception:
     TimeSeriesDataSet = None
     GroupNormalizer = None
 
-
 st.set_page_config(
     page_title="Dashboard Prediksi Saham Indonesia",
     page_icon="📈",
@@ -37,6 +36,7 @@ CONFIG_PATH = ROOT / "configs" / "model_tft.yaml"
 
 COLOR_SEQUENCE = ["#38BDF8", "#F97316", "#22C55E", "#A855F7", "#F43F5E", "#14B8A6", "#FACC15"]
 MODEL_COLORS = {
+    "Encoder 15 Hari": "#E5E7EB",
     "TFT": "#38BDF8",
     "LLM-TFT": "#F97316",
     "TFT S5": "#38BDF8",
@@ -523,68 +523,56 @@ def get_selected_predictions(prediction_df):
     return selected.set_index("Horizon")["Prediksi"].to_dict()
 
 
-def show_prediction_chart(prediction_df):
-    if prediction_df is None or prediction_df.empty:
-        return
-    chart_df = prediction_df.copy()
-    chart_df["Horizon"] = pd.Categorical(chart_df["Horizon"], categories=["H+1", "H+2", "H+3"], ordered=True)
-    chart_df = chart_df.sort_values(["Model_Normalized", "Horizon"])
-    fig = px.line(chart_df, x="Horizon", y="Prediksi", color="Model_Normalized", markers=True, title="Prediksi Multi-Horizon", color_discrete_map=MODEL_COLORS)
-    fig.update_traces(line=dict(width=4), marker=dict(size=11))
-    fig.update_yaxes(title="Harga Prediksi")
-    st.plotly_chart(layout(fig, 430), use_container_width=True)
-
-
 def build_encoder_df(df_master, ticker, dates, encoder_length=15):
     df = filter_df(df_master, ticker, dates)
     if df is None or df.empty:
         return pd.DataFrame()
     work = df.copy()
-    if "ticker" in work.columns:
-        if ticker == "Semua":
-            sort_col = date_col(work) or "time_idx" if "time_idx" in work.columns else None
-            if sort_col:
-                latest_ticker = work.sort_values(sort_col).dropna(subset=["ticker"]).tail(1)["ticker"].iloc[0]
-            else:
-                latest_ticker = sorted(work["ticker"].dropna().astype(str).unique().tolist())[0]
-            work = work[work["ticker"].eq(latest_ticker)]
-    sort_columns = []
+    if "ticker" in work.columns and ticker == "Semua":
+        sort_col = date_col(work) or ("time_idx" if "time_idx" in work.columns else None)
+        latest_ticker = work.sort_values(sort_col).dropna(subset=["ticker"]).tail(1)["ticker"].iloc[0] if sort_col else sorted(work["ticker"].dropna().astype(str).unique().tolist())[0]
+        work = work[work["ticker"].eq(latest_ticker)]
     dc = date_col(work)
     if dc:
-        sort_columns.append(dc)
+        work = work.sort_values(dc)
     elif "time_idx" in work.columns:
-        sort_columns.append("time_idx")
-    if sort_columns:
-        work = work.sort_values(sort_columns)
+        work = work.sort_values("time_idx")
     encoder = work.tail(encoder_length).copy()
-    if encoder.empty:
-        return encoder
-    encoder["Encoder Step"] = list(range(-len(encoder) + 1, 1))
-    if dc:
-        encoder["Tanggal"] = encoder[dc].dt.strftime("%Y-%m-%d")
-    else:
-        encoder["Tanggal"] = encoder.get("time_idx", encoder["Encoder Step"]).astype(str)
-    return encoder
+    if encoder.empty or "close" not in encoder.columns:
+        return pd.DataFrame()
+    encoder["Step"] = list(range(-len(encoder) + 1, 1))
+    encoder["Harga"] = encoder["close"]
+    encoder["Series"] = "Encoder 15 Hari"
+    return encoder[["Step", "Harga", "Series"]]
 
 
-def show_encoder_panel(df_master, ticker, dates):
-    encoder_df = build_encoder_df(df_master, ticker, dates, encoder_length=15)
-    st.subheader("Data Encoder 15 Hari Terakhir")
-    if encoder_df is None or encoder_df.empty or "close" not in encoder_df.columns:
-        st.info("Data encoder 15 hari belum tersedia.")
+def show_encoder_prediction_chart(df_master, ticker, dates, prediction_df):
+    encoder_df = build_encoder_df(df_master, ticker, dates, 15)
+    rows = []
+    if encoder_df is not None and not encoder_df.empty:
+        rows.extend(encoder_df.to_dict("records"))
+    latest_close = rows[-1]["Harga"] if rows else None
+    if prediction_df is not None and not prediction_df.empty:
+        for model_name, group in prediction_df.groupby("Model_Normalized"):
+            model_rows = []
+            if latest_close is not None and not pd.isna(latest_close):
+                model_rows.append({"Step": 0, "Harga": latest_close, "Series": model_name})
+            for _, row in group.iterrows():
+                step = int(str(row["Horizon"]).replace("H+", ""))
+                model_rows.append({"Step": step, "Harga": row["Prediksi"], "Series": model_name})
+            rows.extend(model_rows)
+    chart_df = pd.DataFrame(rows).dropna(subset=["Harga"])
+    st.subheader("Encoder 15 Hari dan Prediksi Multi-Horizon")
+    if chart_df.empty:
+        st.info("Data encoder dan prediksi belum tersedia.")
         return
-    fig_close = px.line(encoder_df, x="Encoder Step", y="close", markers=True, title="Close pada 15 Langkah Encoder", hover_data=["Tanggal"] if "Tanggal" in encoder_df.columns else None)
-    fig_close.update_traces(line=dict(color="#38BDF8", width=4), marker=dict(size=10))
-    fig_close.update_xaxes(dtick=1)
-    st.plotly_chart(layout(fig_close, 420), use_container_width=True)
-
-    feature_options = [col for col in TECHNICAL_FEATURES + SENTIMENT_FEATURES if col in encoder_df.columns and col != "close"]
-    if feature_options:
-        selected_encoder_feature = st.selectbox("Fitur encoder", feature_options)
-        fig_feature = px.line(encoder_df, x="Encoder Step", y=selected_encoder_feature, markers=True, title=f"{selected_encoder_feature} pada 15 Langkah Encoder", hover_data=["Tanggal"] if "Tanggal" in encoder_df.columns else None)
-        fig_feature.update_traces(line=dict(color="#F97316", width=4), marker=dict(size=10))
-        fig_feature.update_xaxes(dtick=1)
-        st.plotly_chart(layout(fig_feature, 380), use_container_width=True)
+    chart_df = chart_df.sort_values(["Series", "Step"])
+    fig = px.line(chart_df, x="Step", y="Harga", color="Series", markers=True, title="Gabungan Encoder dan Prediksi H+1 sampai H+3", color_discrete_map=MODEL_COLORS)
+    fig.update_traces(line=dict(width=4), marker=dict(size=10))
+    fig.update_xaxes(tickmode="array", tickvals=list(range(-14, 4)), ticktext=[f"T{x}" if x < 0 else ("T" if x == 0 else f"H+{x}") for x in range(-14, 4)], title="Langkah Waktu")
+    fig.update_yaxes(title="Harga Close / Prediksi")
+    fig.add_vline(x=0, line_dash="dash", line_color="rgba(255,255,255,0.45)")
+    st.plotly_chart(layout(fig, 460), use_container_width=True)
 
 
 def show_eval_section(title, df, scope, x_field=None):
@@ -592,10 +580,7 @@ def show_eval_section(title, df, scope, x_field=None):
     if long_df.empty:
         st.info(f"{title} belum dapat ditampilkan karena file belum tersedia atau tidak memiliki kolom numerik metrik.")
         return
-    if x_field and x_field in long_df.columns and long_df[x_field].notna().any():
-        x_axis = x_field
-    else:
-        x_axis = "Model"
+    x_axis = x_field if x_field and x_field in long_df.columns and long_df[x_field].notna().any() else "Model"
     preferred_order = ["RMSE", "MAE", "MAPE", "R²", "Directional Accuracy"]
     metrics = [m for m in preferred_order if m in long_df["Metric"].unique().tolist()]
     metrics += [m for m in long_df["Metric"].unique().tolist() if m not in metrics]
@@ -690,7 +675,6 @@ if page == "Model dan Prediksi":
         with b2: action_button("Latih TFT", "Latih TFT")
         with b3: action_button("Latih LLM-TFT", "Latih LLM-TFT")
         with b4: action_button("Backtest", "Backtest model")
-
     df_master = filter_df(master, selected_ticker, selected_dates)
     df_pred = filter_df(predictions, selected_ticker, selected_dates)
     cutoff_date = None
@@ -702,14 +686,12 @@ if page == "Model dan Prediksi":
     fallback_predictions = extract_horizon_predictions(df_pred)
     prediction_df = build_prediction_rows(checkpoint_predictions, fallback_predictions)
     selected_prediction = get_selected_predictions(prediction_df)
-
     latest_close = None
     if df_master is not None and not df_master.empty and "close" in df_master.columns:
         dc = date_col(df_master) or "date"
         close_values = df_master.sort_values(dc)["close"].dropna()
         if not close_values.empty:
             latest_close = float(close_values.tail(1).iloc[-1])
-
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Dataset", fmt(len(df_master) if df_master is not None else 0))
     for card, horizon in zip([c2, c3, c4], ["H+1", "H+2", "H+3"]):
@@ -719,12 +701,8 @@ if page == "Model dan Prediksi":
             card.metric(horizon, f"Rp {fmt(value)}", delta)
         else:
             card.metric(horizon, "-", "")
-
-    show_prediction_chart(prediction_df)
-    show_encoder_panel(df_master, selected_ticker, selected_dates)
-
+    show_encoder_prediction_chart(df_master, selected_ticker, selected_dates, prediction_df)
     if df_master is not None and not df_master.empty:
-        dc = date_col(df_master) or "date"
         left, right = st.columns(2)
         with left:
             if "ticker" in df_master.columns:
@@ -745,17 +723,11 @@ elif page == "Evaluasi Model":
         b1, b2 = st.columns(2)
         with b1: action_button("Evaluasi", "Evaluasi model")
         with b2: action_button("Interpretasi", "Interpretasi model")
-
     tab_global, tab_horizon, tab_ticker, tab_attention = st.tabs(["Global", "Horizon", "Emiten", "Attention"])
-    with tab_global:
-        show_eval_section("Evaluasi Global", eval_global, "global")
-    with tab_horizon:
-        show_eval_section("Evaluasi per Horizon", eval_horizon, "horizon", "Horizon")
-    with tab_ticker:
-        show_eval_section("Evaluasi per Emiten", eval_ticker, "ticker", "Ticker")
-    with tab_attention:
-        show_attention(attention)
-
+    with tab_global: show_eval_section("Evaluasi Global", eval_global, "global")
+    with tab_horizon: show_eval_section("Evaluasi per Horizon", eval_horizon, "horizon", "Horizon")
+    with tab_ticker: show_eval_section("Evaluasi per Emiten", eval_ticker, "ticker", "Ticker")
+    with tab_attention: show_attention(attention)
     df_pred = filter_df(predictions, selected_ticker, selected_dates)
     if df_pred is not None and not df_pred.empty:
         dc = date_col(df_pred)
@@ -851,11 +823,6 @@ elif page == "Berita Keuangan dan Sentimen":
                 fig = px.area(daily_count, x="day", y="Jumlah", title="Tren Jumlah Berita Harian", color_discrete_sequence=["#38BDF8"])
                 fig.update_traces(line=dict(width=3))
                 st.plotly_chart(layout(fig), use_container_width=True)
-    s1, s2, s3 = st.columns(3)
-    pipeline_available = (df_articles is not None and not df_articles.empty) or (df_daily is not None and not df_daily.empty)
-    s1.metric("LLM Label", "Ada" if pipeline_available else "-")
-    s2.metric("Leksikon", "Ada" if pipeline_available else "-")
-    s3.metric("Respons Pasar", "Ada" if pipeline_available else "-")
     m1, m2 = st.columns(2)
     with m1:
         final_col = find_col(df_articles, FINAL_LABEL_COLS)
