@@ -50,8 +50,8 @@ def make_dataset(df, ticker, cutoff, model_name):
     work = prep_master(df)
     if work.empty:
         return None
-    ticker = sorted(work["ticker"].dropna().unique())[0] if ticker == "Semua" else ticker
-    data = work[work["ticker"].eq(ticker)].copy()
+    selected = ticker or sorted(work["ticker"].dropna().unique())[0]
+    data = work[work["ticker"].eq(selected)].copy()
     dc = date_col(data)
     if cutoff is not None and dc:
         data = data[data[dc] <= pd.to_datetime(cutoff)]
