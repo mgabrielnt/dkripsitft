@@ -1,0 +1,17 @@
+PIPELINE = {
+    "Ambil berita RSS dan Google News": "python -m src.data.fetch_news_rss_google",
+    "Ambil berita Yahoo Finance": "python -m src.data.fetch_news_yahoo",
+    "Gabung sumber berita": "python -m src.data.merge_news_sources",
+    "Bersihkan teks berita": "python -m src.data.preprocess_news_text",
+    "Ambil harga Yahoo Finance": "python -m src.data.download_prices_yahoo",
+    "Hitung indikator teknikal": "python -m src.data.compute_technical_indicators",
+    "Audit kalender harga": "python -m src.data.check_price_calendar",
+    "Label sentimen artikel": "python -m src.data.gpt_sentiment_labeling",
+    "Agregasi sentimen harian": "python -m src.data.aggregate_daily_sentiment",
+    "Bangun dataset master": "python -m src.data.build_tft_master_dataset",
+    "Latih TFT": "python -m src.models.train_tft_baseline",
+    "Latih LLM-TFT": "python -m src.models.train_tft_with_sentiment",
+    "Evaluasi model": "python -m src.models.evaluate_tft_models",
+    "Backtest model": "python -m src.models.evaluate_tft_backtest",
+    "Interpretasi model": "python -m src.models.interpret_tft_models",
+}
