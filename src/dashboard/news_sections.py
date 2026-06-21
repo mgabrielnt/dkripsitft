@@ -41,17 +41,13 @@ def show_source_chart(news):
 
 def show_label_sentiment(articles, daily):
     st.subheader("Pelabelan Berita dan Sentimen Harian")
-    c1, c2, c3 = st.columns(3)
-    final_col = find_col(articles, FINAL_LABELS)
-    c1.metric("Artikel Berlabel", fmt(len(articles) if articles is not None else 0))
-    c2.metric("Sentimen Harian", fmt(len(daily) if daily is not None else 0))
-    c3.metric("Kolom Label", final_col if final_col else "-")
     left, right = st.columns(2)
-    show_label_chart(articles, final_col, left)
+    show_label_chart(articles, left)
     show_sentiment_chart(daily, right)
 
 
-def show_label_chart(articles, final_col, container):
+def show_label_chart(articles, container):
+    final_col = find_col(articles, FINAL_LABELS)
     if articles is None or articles.empty or not final_col:
         container.info("Data pelabelan belum tersedia.")
         return
