@@ -7,7 +7,6 @@ MODEL_COLS = ["model", "model_name", "scenario", "skenario", "method", "metode",
 HORIZON_COLS = ["horizon", "h", "step", "forecast_horizon", "prediction_horizon"]
 PRED_COLS = ["prediction", "predicted", "y_pred", "pred", "forecast", "pred_close"]
 LLM_KEYS = ["llmtft", "llm", "hybrid", "sent", "s1"]
-TFT_KEYS = ["tft", "baseline", "base", "s5"]
 
 
 def normalize_model(value):
@@ -38,7 +37,7 @@ def predict_checkpoints(master, ticker, cutoff):
         key = f"{model} {scenario}"
         try:
             loaded = load_tft(ckpt)
-            dataset = make_dataset(master, ticker, cutoff, model)
+            dataset = make_dataset(master, ticker, cutoff, model, loaded)
             if loaded is None or dataset is None:
                 out[key] = [None, None, None]
                 continue
@@ -75,22 +74,19 @@ def prepare_prediction_frame(df, preferred_model):
 
 def extract_model_wide_predictions(work, result):
     for step in [1, 2, 3]:
-        col = find_model_prediction_col(work, step, LLM_KEYS)
+        col = find_model_prediction_col(work, step)
         if col and pd.api.types.is_numeric_dtype(work[col]):
             val = work[col].dropna().tail(1)
             result[f"H+{step}"] = None if val.empty else float(val.iloc[-1])
     return result
 
 
-def find_model_prediction_col(work, step, model_keys):
-    horizon_keys = [f"h{step}", f"horizon{step}", f"pred{step}", f"prediction{step}", f"{step}"]
-    pred_keys = ["pred", "prediction", "forecast", "yhat", "ypred"]
+def find_model_prediction_col(work, step):
+    hkeys = [f"h{step}", f"horizon{step}", f"pred{step}", f"prediction{step}", f"{step}"]
+    pkeys = ["pred", "prediction", "forecast", "yhat", "ypred"]
     for col in work.columns:
         low = norm(col)
-        has_model = any(key in low for key in model_keys)
-        has_horizon = any(key in low for key in horizon_keys)
-        has_pred = any(key in low for key in pred_keys)
-        if has_model and has_horizon and has_pred:
+        if any(k in low for k in LLM_KEYS) and any(k in low for k in hkeys) and any(k in low for k in pkeys):
             return col
     return None
 
