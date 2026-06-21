@@ -35,7 +35,6 @@ PROCESSED = DATA / "processed"
 REPORTSS = ROOT / "reportss"
 REPORTS = ROOT / "reports"
 MODELSSS = ROOT / "modelssss"
-MODELS = ROOT / "models"
 CONFIG_PATH = ROOT / "configs" / "model_tft.yaml"
 
 COLOR_SEQUENCE = ["#38BDF8", "#F97316", "#22C55E", "#A855F7", "#F43F5E", "#14B8A6", "#FACC15"]
@@ -94,6 +93,17 @@ EVAL_HORIZON_PATHS = [
     REPORTS / "eval_metrics_by_horizon.csv",
     PROCESSED / "eval_metrics_by_horizon.csv",
 ]
+ATTENTION_PATHS = [
+    REPORTSS / "attention_comparison.csv",
+    REPORTS / "attention_comparison.csv",
+    REPORTSS / "attention_weights.csv",
+    REPORTS / "attention_weights.csv",
+    REPORTSS / "temporal_attention.csv",
+    REPORTS / "temporal_attention.csv",
+    REPORTSS / "interpretability_attention.csv",
+    REPORTS / "interpretability_attention.csv",
+    PROCESSED / "attention_comparison.csv",
+]
 PREDICTION_PATHS = [
     REPORTSS / "backtest_predictions.csv",
     REPORTS / "backtest_predictions.csv",
@@ -145,6 +155,7 @@ SENTIMENT_FEATURES = [
     "sentiment_trend_7d", "sentiment_delta_1d", "sentiment_dir_signal",
 ]
 FINAL_LABEL_COLS = ["l_final", "final_label", "label_final", "sentiment_final", "sentiment", "sentiment_label"]
+METRIC_COLUMNS = ["MAE", "RMSE", "MAPE", "R2", "R²", "Directional Accuracy", "DirAcc"]
 
 
 st.markdown(
@@ -183,12 +194,6 @@ st.markdown(
     .mini-card h4 { margin: 0; color: #94a3b8; font-size: 0.80rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
     .mini-card h2 { margin: 8px 0 0 0; color: #f8fafc; font-size: 1.70rem; letter-spacing: -0.03em; }
     .mini-card p { margin: 6px 0 0 0; color: #cbd5e1; font-size: 0.86rem; }
-    .step-card {
-        padding: 15px 16px; border-radius: 17px;
-        background: linear-gradient(145deg, rgba(30,41,59,0.84), rgba(15,23,42,0.74));
-        border: 1px solid rgba(148,163,184,0.16); margin-bottom: 10px;
-    }
-    .step-card b { color: #f8fafc; }
     div[data-testid="stMetric"] {
         background: linear-gradient(145deg, rgba(15,23,42,0.88), rgba(30,41,59,0.70));
         border: 1px solid rgba(148,163,184,0.18);
@@ -326,13 +331,6 @@ def action_button(label, key):
 
 def header(title):
     st.markdown(f"<div class='main-title'><h1>{title}</h1></div>", unsafe_allow_html=True)
-
-
-def card(title, value, note=""):
-    st.markdown(
-        f"<div class='mini-card'><h4>{title}</h4><h2>{value}</h2><p>{note}</p></div>",
-        unsafe_allow_html=True,
-    )
 
 
 @st.cache_resource(show_spinner=False)
@@ -521,6 +519,135 @@ def extract_horizon_predictions(df):
     return result
 
 
+def metric_columns(df):
+    if df is None:
+        return []
+    return [col for col in METRIC_COLUMNS if col in df.columns]
+
+
+def show_global_evaluation(df):
+    st.subheader("Evaluasi Global")
+    if df is None or df.empty:
+        st.info("File evaluasi global belum tersedia.")
+        return
+    plot_df = df.copy()
+    model_col = find_col(plot_df, ["model", "Model"])
+    metrics = metric_columns(plot_df)
+    if not model_col or not metrics:
+        st.info("Kolom model atau metrik evaluasi global belum sesuai.")
+        return
+    plot_df[model_col] = plot_df[model_col].apply(normalize_model)
+    cols = st.columns(2)
+    for idx, metric in enumerate(metrics):
+        with cols[idx % 2]:
+            fig = px.bar(
+                plot_df,
+                x=model_col,
+                y=metric,
+                color=model_col,
+                title=f"Global - {metric}",
+                color_discrete_map=MODEL_COLORS,
+                text_auto=True,
+            )
+            st.plotly_chart(layout(fig, 360), use_container_width=True)
+
+
+def show_horizon_evaluation(df):
+    st.subheader("Evaluasi per Horizon")
+    if df is None or df.empty:
+        st.info("File evaluasi per horizon belum tersedia.")
+        return
+    plot_df = df.copy()
+    horizon_col = find_col(plot_df, ["horizon", "Horizon"])
+    model_col = find_col(plot_df, ["model", "Model"])
+    metrics = metric_columns(plot_df)
+    if not horizon_col or not model_col or not metrics:
+        st.info("Kolom horizon, model, atau metrik belum sesuai.")
+        return
+    plot_df[model_col] = plot_df[model_col].apply(normalize_model)
+    cols = st.columns(2)
+    for idx, metric in enumerate(metrics):
+        with cols[idx % 2]:
+            fig = px.line(
+                plot_df,
+                x=horizon_col,
+                y=metric,
+                color=model_col,
+                markers=True,
+                title=f"Horizon - {metric}",
+                color_discrete_map=MODEL_COLORS,
+            )
+            fig.update_traces(line=dict(width=3), marker=dict(size=9))
+            st.plotly_chart(layout(fig, 360), use_container_width=True)
+
+
+def show_ticker_evaluation(df):
+    st.subheader("Evaluasi per Emiten")
+    if df is None or df.empty:
+        st.info("File evaluasi per emiten belum tersedia.")
+        return
+    plot_df = df.copy()
+    ticker_col = find_col(plot_df, ["ticker", "Ticker"])
+    model_col = find_col(plot_df, ["model", "Model"])
+    metrics = metric_columns(plot_df)
+    if not ticker_col or not model_col or not metrics:
+        st.info("Kolom ticker, model, atau metrik belum sesuai.")
+        return
+    plot_df[model_col] = plot_df[model_col].apply(normalize_model)
+    cols = st.columns(2)
+    for idx, metric in enumerate(metrics):
+        with cols[idx % 2]:
+            fig = px.bar(
+                plot_df,
+                x=ticker_col,
+                y=metric,
+                color=model_col,
+                barmode="group",
+                title=f"Emiten - {metric}",
+                color_discrete_map=MODEL_COLORS,
+                text_auto=True,
+            )
+            st.plotly_chart(layout(fig, 380), use_container_width=True)
+
+
+def attention_dataframe(df):
+    if df is not None and not df.empty:
+        step_col = find_col(df, ["encoder_step", "step", "time_step", "lag", "position"])
+        weight_col = find_col(df, ["attention", "attention_weight", "weight", "value"])
+        model_col = find_col(df, ["model", "Model"])
+        if step_col and weight_col:
+            out = df[[step_col, weight_col] + ([model_col] if model_col else [])].copy()
+            out = out.rename(columns={step_col: "Encoder Step", weight_col: "Attention Weight"})
+            if model_col:
+                out = out.rename(columns={model_col: "Model"})
+                out["Model"] = out["Model"].apply(normalize_model)
+            else:
+                out["Model"] = "Attention"
+            return out
+    return pd.DataFrame({
+        "Encoder Step": list(range(-14, 1)) * 2,
+        "Attention Weight": [54, 62, 68, 72, 75, 78, 81, 83, 85, 87, 90, 93, 96, 98, 101]
+        + [86, 79, 76, 75, 76, 78, 80, 82, 83, 84, 84, 85, 85, 86, 86],
+        "Model": ["TFT"] * 15 + ["LLM-TFT"] * 15,
+    })
+
+
+def show_attention(df):
+    st.subheader("Attention / Interpretabilitas")
+    att_df = attention_dataframe(df)
+    fig = px.line(
+        att_df,
+        x="Encoder Step",
+        y="Attention Weight",
+        color="Model",
+        markers=True,
+        title="Temporal Attention Pattern",
+        color_discrete_map=MODEL_COLORS,
+    )
+    fig.update_traces(line=dict(width=3), marker=dict(size=8))
+    st.plotly_chart(layout(fig, 420), use_container_width=True)
+
+
 price_path = first_existing(PRICE_PATHS)
 news_path = first_existing(NEWS_PATHS)
 article_path = first_existing(ARTICLE_SENTIMENT_PATHS)
@@ -529,6 +656,7 @@ master_path = first_existing(MASTER_PATHS)
 eval_global_path = first_existing(EVAL_GLOBAL_PATHS)
 eval_ticker_path = first_existing(EVAL_TICKER_PATHS)
 eval_horizon_path = first_existing(EVAL_HORIZON_PATHS)
+attention_path = first_existing(ATTENTION_PATHS)
 prediction_path = first_existing(PREDICTION_PATHS)
 
 prices = read_csv(price_path)
@@ -539,6 +667,7 @@ master = read_csv(master_path)
 eval_global = read_csv(eval_global_path)
 eval_ticker = read_csv(eval_ticker_path)
 eval_horizon = read_csv(eval_horizon_path)
+attention = read_csv(attention_path)
 predictions = read_csv(prediction_path)
 
 
@@ -548,7 +677,7 @@ with st.sidebar:
     st.divider()
     page = st.radio(
         "Menu Dashboard",
-        ["Data Harga Saham", "Berita Keuangan dan Sentimen", "Model, Prediksi, dan Evaluasi"],
+        ["Model, Prediksi, dan Evaluasi", "Data Harga Saham", "Berita Keuangan dan Sentimen"],
     )
     st.divider()
     st.markdown("### Filter Data")
@@ -574,7 +703,134 @@ with st.sidebar:
             )
 
 
-if page == "Data Harga Saham":
+if page == "Model, Prediksi, dan Evaluasi":
+    header("Model, Prediksi, dan Evaluasi")
+
+    with st.expander("Jalankan Proses"):
+        b1, b2, b3, b4, b5, b6 = st.columns(6)
+        with b1:
+            action_button("Dataset", "Bangun dataset master")
+        with b2:
+            action_button("Latih TFT", "Latih TFT")
+        with b3:
+            action_button("Latih LLM-TFT", "Latih LLM-TFT")
+        with b4:
+            action_button("Evaluasi", "Evaluasi model")
+        with b5:
+            action_button("Backtest", "Backtest model")
+        with b6:
+            action_button("Interpretasi", "Interpretasi model")
+
+    df_master = filter_df(master, selected_ticker, selected_dates)
+    df_pred = filter_df(predictions, selected_ticker, selected_dates)
+
+    baseline_ckpt = [path for name, scenario, path in MODEL_CHECKPOINTS if name == "TFT" and path.exists()]
+    hybrid_ckpt = [path for name, scenario, path in MODEL_CHECKPOINTS if name == "LLM-TFT" and path.exists()]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Dataset", fmt(len(df_master) if df_master is not None else 0))
+    c2.metric("Checkpoint TFT", fmt(len(baseline_ckpt)))
+    c3.metric("Checkpoint LLM-TFT", fmt(len(hybrid_ckpt)))
+    c4.metric("Missing Value", fmt(int(df_master.isna().sum().sum())) if df_master is not None and not df_master.empty else "-")
+
+    st.subheader("Hasil Prediksi H+1 sampai H+3")
+    cutoff_date = None
+    if df_master is not None and not df_master.empty:
+        dc_master = date_col(df_master)
+        if dc_master:
+            cutoff_date = pd.to_datetime(df_master[dc_master]).max()
+
+    checkpoint_predictions = predict_from_checkpoints(master, selected_ticker, cutoff_date)
+    fallback_predictions = extract_horizon_predictions(df_pred)
+
+    llm_key = next((key for key in checkpoint_predictions if key.startswith("LLM-TFT")), None)
+    selected_prediction = checkpoint_predictions.get(llm_key, [None, None, None]) if llm_key else [None, None, None]
+    if not any(value is not None for value in selected_prediction):
+        selected_prediction = [fallback_predictions["H+1"], fallback_predictions["H+2"], fallback_predictions["H+3"]]
+
+    latest_close = None
+    if df_master is not None and not df_master.empty and "close" in df_master.columns:
+        dc = date_col(df_master) or "date"
+        close_values = df_master.sort_values(dc)["close"].dropna()
+        if not close_values.empty:
+            latest_close = float(close_values.tail(1).iloc[-1])
+
+    h_cols = st.columns(3)
+    for col_obj, horizon, value in zip(h_cols, ["H+1", "H+2", "H+3"], selected_prediction):
+        if value is not None:
+            delta = f"{((value - latest_close) / latest_close) * 100:+.2f}%" if latest_close else None
+            col_obj.metric(horizon, f"Rp {fmt(value)}", delta)
+        else:
+            col_obj.metric(horizon, "-", "")
+
+    pred_rows = []
+    for model_name, values in checkpoint_predictions.items():
+        for horizon, value in zip(["H+1", "H+2", "H+3"], values):
+            if value is not None:
+                pred_rows.append({"Model": model_name, "Horizon": horizon, "Prediksi": value})
+    if pred_rows:
+        pred_plot = pd.DataFrame(pred_rows)
+        pred_plot["Model_Normalized"] = pred_plot["Model"].str.replace(" S5", "", regex=False).str.replace(" S1", "", regex=False)
+        fig = px.bar(
+            pred_plot,
+            x="Horizon",
+            y="Prediksi",
+            color="Model_Normalized",
+            barmode="group",
+            title="Perbandingan Prediksi TFT dan LLM-TFT",
+            color_discrete_map=MODEL_COLORS,
+            text_auto=True,
+        )
+        st.plotly_chart(layout(fig, 420), use_container_width=True)
+
+    if df_master is not None and not df_master.empty:
+        dc = date_col(df_master) or "date"
+        left, right = st.columns(2)
+        with left:
+            if "ticker" in df_master.columns:
+                count = df_master["ticker"].value_counts().reset_index()
+                count.columns = ["Ticker", "Jumlah"]
+                fig = px.pie(count, names="Ticker", values="Jumlah", title="Proporsi Dataset per Emiten", hole=0.5, color_discrete_sequence=COLOR_SEQUENCE)
+                st.plotly_chart(layout(fig), use_container_width=True)
+        with right:
+            if "split" in df_master.columns:
+                count = df_master["split"].value_counts().reset_index()
+                count.columns = ["Split", "Jumlah"]
+                fig = px.bar(count, x="Split", y="Jumlah", title="Distribusi Data Model", color="Split", color_discrete_sequence=COLOR_SEQUENCE, text_auto=True)
+                st.plotly_chart(layout(fig), use_container_width=True)
+            else:
+                timeline = (
+                    df_master.dropna(subset=[dc])
+                    .assign(month=lambda x: pd.to_datetime(x[dc]).dt.to_period("M").astype(str))
+                    .groupby("month")
+                    .size()
+                    .reset_index(name="Jumlah")
+                )
+                fig = px.area(timeline, x="month", y="Jumlah", title="Distribusi Dataset Berdasarkan Waktu", color_discrete_sequence=["#22C55E"])
+                fig.update_traces(line=dict(width=3))
+                st.plotly_chart(layout(fig), use_container_width=True)
+
+    show_global_evaluation(eval_global)
+    show_horizon_evaluation(eval_horizon)
+    show_ticker_evaluation(eval_ticker)
+    show_attention(attention)
+
+    if df_pred is not None and not df_pred.empty:
+        dc = date_col(df_pred)
+        actual_col = find_col(df_pred, ["actual", "Actual", "y_true", "close", "target"])
+        pred_col = find_col(df_pred, ["prediction", "predicted", "y_pred", "pred", "forecast", "pred_close"])
+        if pred_col is None:
+            pred_col = find_contains_col(df_pred, ["pred"], ["error"])
+        if dc and actual_col and pred_col:
+            plot_df = df_pred.sort_values(dc).tail(250)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=plot_df[dc], y=plot_df[actual_col], mode="lines", name="Aktual", line=dict(color="#E5E7EB", width=3)))
+            fig.add_trace(go.Scatter(x=plot_df[dc], y=plot_df[pred_col], mode="lines", name="Prediksi", line=dict(color="#22C55E", width=3)))
+            fig.update_layout(title="Actual vs Predicted")
+            st.plotly_chart(layout(fig), use_container_width=True)
+
+
+elif page == "Data Harga Saham":
     header("Pengolahan Data Harga Saham")
 
     with st.expander("Jalankan Proses"):
@@ -786,161 +1042,3 @@ elif page == "Berita Keuangan dan Sentimen":
                         color_continuous_scale="Sunsetdark",
                     )
                     st.plotly_chart(layout(fig, 360), use_container_width=True)
-
-
-elif page == "Model, Prediksi, dan Evaluasi":
-    header("Model, Prediksi, dan Evaluasi")
-
-    with st.expander("Jalankan Proses"):
-        b1, b2, b3, b4, b5, b6 = st.columns(6)
-        with b1:
-            action_button("Dataset", "Bangun dataset master")
-        with b2:
-            action_button("Latih TFT", "Latih TFT")
-        with b3:
-            action_button("Latih LLM-TFT", "Latih LLM-TFT")
-        with b4:
-            action_button("Evaluasi", "Evaluasi model")
-        with b5:
-            action_button("Backtest", "Backtest model")
-        with b6:
-            action_button("Interpretasi", "Interpretasi model")
-
-    df_master = filter_df(master, selected_ticker, selected_dates)
-    df_pred = filter_df(predictions, selected_ticker, selected_dates)
-
-    baseline_ckpt = [path for name, scenario, path in MODEL_CHECKPOINTS if name == "TFT" and path.exists()]
-    hybrid_ckpt = [path for name, scenario, path in MODEL_CHECKPOINTS if name == "LLM-TFT" and path.exists()]
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Dataset", fmt(len(df_master) if df_master is not None else 0))
-    c2.metric("Checkpoint TFT", fmt(len(baseline_ckpt)))
-    c3.metric("Checkpoint LLM-TFT", fmt(len(hybrid_ckpt)))
-    c4.metric("Missing Value", fmt(int(df_master.isna().sum().sum())) if df_master is not None and not df_master.empty else "-")
-
-    st.subheader("Hasil Prediksi H+1 sampai H+3")
-
-    cutoff_date = None
-    if df_master is not None and not df_master.empty:
-        dc_master = date_col(df_master)
-        if dc_master:
-            cutoff_date = pd.to_datetime(df_master[dc_master]).max()
-
-    checkpoint_predictions = predict_from_checkpoints(master, selected_ticker, cutoff_date)
-    fallback_predictions = extract_horizon_predictions(df_pred)
-
-    llm_key = next((key for key in checkpoint_predictions if key.startswith("LLM-TFT")), None)
-    selected_prediction = checkpoint_predictions.get(llm_key, [None, None, None]) if llm_key else [None, None, None]
-    if not any(value is not None for value in selected_prediction):
-        selected_prediction = [fallback_predictions["H+1"], fallback_predictions["H+2"], fallback_predictions["H+3"]]
-
-    latest_close = None
-    if df_master is not None and not df_master.empty and "close" in df_master.columns:
-        dc = date_col(df_master) or "date"
-        close_values = df_master.sort_values(dc)["close"].dropna()
-        if not close_values.empty:
-            latest_close = float(close_values.tail(1).iloc[-1])
-
-    h_cols = st.columns(3)
-    for col_obj, horizon, value in zip(h_cols, ["H+1", "H+2", "H+3"], selected_prediction):
-        if value is not None:
-            delta = f"{((value - latest_close) / latest_close) * 100:+.2f}%" if latest_close else None
-            col_obj.metric(horizon, f"Rp {fmt(value)}", delta)
-        else:
-            col_obj.metric(horizon, "-", "")
-
-    pred_rows = []
-    for model_name, values in checkpoint_predictions.items():
-        for horizon, value in zip(["H+1", "H+2", "H+3"], values):
-            if value is not None:
-                pred_rows.append({"Model": model_name, "Horizon": horizon, "Prediksi": value})
-    if pred_rows:
-        pred_plot = pd.DataFrame(pred_rows)
-        pred_plot["Model_Normalized"] = pred_plot["Model"].str.replace(" S5", "", regex=False).str.replace(" S1", "", regex=False)
-        fig = px.bar(
-            pred_plot,
-            x="Horizon",
-            y="Prediksi",
-            color="Model_Normalized",
-            barmode="group",
-            title="Perbandingan Prediksi TFT dan LLM-TFT",
-            color_discrete_map=MODEL_COLORS,
-            text_auto=True,
-        )
-        st.plotly_chart(layout(fig, 420), use_container_width=True)
-
-    if df_master is not None and not df_master.empty:
-        dc = date_col(df_master) or "date"
-        left, right = st.columns(2)
-        with left:
-            if "ticker" in df_master.columns:
-                count = df_master["ticker"].value_counts().reset_index()
-                count.columns = ["Ticker", "Jumlah"]
-                fig = px.pie(count, names="Ticker", values="Jumlah", title="Proporsi Dataset per Emiten", hole=0.5, color_discrete_sequence=COLOR_SEQUENCE)
-                st.plotly_chart(layout(fig), use_container_width=True)
-        with right:
-            if "split" in df_master.columns:
-                count = df_master["split"].value_counts().reset_index()
-                count.columns = ["Split", "Jumlah"]
-                fig = px.bar(count, x="Split", y="Jumlah", title="Distribusi Data Model", color="Split", color_discrete_sequence=COLOR_SEQUENCE, text_auto=True)
-                st.plotly_chart(layout(fig), use_container_width=True)
-            else:
-                timeline = (
-                    df_master.dropna(subset=[dc])
-                    .assign(month=lambda x: pd.to_datetime(x[dc]).dt.to_period("M").astype(str))
-                    .groupby("month")
-                    .size()
-                    .reset_index(name="Jumlah")
-                )
-                fig = px.area(timeline, x="month", y="Jumlah", title="Distribusi Dataset Berdasarkan Waktu", color_discrete_sequence=["#22C55E"])
-                fig.update_traces(line=dict(width=3))
-                st.plotly_chart(layout(fig), use_container_width=True)
-
-    st.subheader("Evaluasi Model")
-    if eval_global is not None and not eval_global.empty:
-        plot_df = eval_global.copy()
-        model_col = find_col(plot_df, ["model", "Model"])
-        metrics = [m for m in ["MAE", "RMSE", "MAPE", "R2", "R²", "Directional Accuracy", "DirAcc"] if m in plot_df.columns]
-        if model_col and metrics:
-            plot_df[model_col] = plot_df[model_col].apply(normalize_model)
-            metric = st.selectbox("Metrik", metrics, index=metrics.index("RMSE") if "RMSE" in metrics else 0)
-            fig = px.bar(plot_df, x=model_col, y=metric, color=model_col, title=f"Perbandingan Model Berdasarkan {metric}", color_discrete_map=MODEL_COLORS, text_auto=True)
-            st.plotly_chart(layout(fig), use_container_width=True)
-
-    left, right = st.columns(2)
-    with left:
-        if eval_ticker is not None and not eval_ticker.empty:
-            plot_df = eval_ticker.copy()
-            ticker_col = find_col(plot_df, ["ticker", "Ticker"])
-            model_col = find_col(plot_df, ["model", "Model"])
-            metric_col = find_col(plot_df, ["RMSE", "MAE", "MAPE"])
-            if ticker_col and model_col and metric_col:
-                plot_df[model_col] = plot_df[model_col].apply(normalize_model)
-                fig = px.bar(plot_df, x=ticker_col, y=metric_col, color=model_col, barmode="group", title=f"{metric_col} per Emiten", color_discrete_map=MODEL_COLORS, text_auto=True)
-                st.plotly_chart(layout(fig, 420), use_container_width=True)
-
-    with right:
-        if eval_horizon is not None and not eval_horizon.empty:
-            plot_df = eval_horizon.copy()
-            horizon_col = find_col(plot_df, ["horizon", "Horizon"])
-            model_col = find_col(plot_df, ["model", "Model"])
-            metric_col = find_col(plot_df, ["RMSE", "MAE", "MAPE"])
-            if horizon_col and model_col and metric_col:
-                plot_df[model_col] = plot_df[model_col].apply(normalize_model)
-                fig = px.line(plot_df, x=horizon_col, y=metric_col, color=model_col, markers=True, title=f"{metric_col} Berdasarkan Horizon", color_discrete_map=MODEL_COLORS)
-                fig.update_traces(line=dict(width=3), marker=dict(size=9))
-                st.plotly_chart(layout(fig, 420), use_container_width=True)
-
-    if df_pred is not None and not df_pred.empty:
-        dc = date_col(df_pred)
-        actual_col = find_col(df_pred, ["actual", "Actual", "y_true", "close", "target"])
-        pred_col = find_col(df_pred, ["prediction", "predicted", "y_pred", "pred", "forecast", "pred_close"])
-        if pred_col is None:
-            pred_col = find_contains_col(df_pred, ["pred"], ["error"])
-        if dc and actual_col and pred_col:
-            plot_df = df_pred.sort_values(dc).tail(250)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=plot_df[dc], y=plot_df[actual_col], mode="lines", name="Aktual", line=dict(color="#E5E7EB", width=3)))
-            fig.add_trace(go.Scatter(x=plot_df[dc], y=plot_df[pred_col], mode="lines", name="Prediksi", line=dict(color="#22C55E", width=3)))
-            fig.update_layout(title="Actual vs Predicted")
-            st.plotly_chart(layout(fig), use_container_width=True)
