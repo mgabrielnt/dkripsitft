@@ -5,18 +5,23 @@ from config import MODEL_COLORS
 from ui import layout
 from utils import date_col, filter_df
 
+def sort_column(df):
+    return date_col(df) or ("time_idx" if df is not None and "time_idx" in df.columns else None)
+
 def encoder_df(master, ticker, dates, n=15):
     df = filter_df(master, ticker, dates)
     if df is None or df.empty or "close" not in df.columns:
         return pd.DataFrame()
     work = df.copy()
+    sort_col = sort_column(work)
     if "ticker" in work.columns and ticker == "Semua":
-        sort_col = date_col(work) or ("time_idx" if "time_idx" in work.columns else None)
         tick = work.sort_values(sort_col).tail(1)["ticker"].iloc[0] if sort_col else work["ticker"].iloc[0]
         work = work[work["ticker"].eq(tick)]
-    dc = date_col(work)
-    work = work.sort_values(dc) if dc else work.sort_values("time_idx")
+    sort_col = sort_column(work)
+    work = work.sort_values(sort_col) if sort_col else work
     enc = work.tail(n).copy()
+    if enc.empty:
+        return pd.DataFrame()
     enc["Step"] = list(range(-len(enc) + 1, 1))
     enc["Harga"] = enc["close"]
     enc["Series"] = "Encoder 15 Hari"
@@ -38,9 +43,8 @@ def combined_chart(master, ticker, dates, pred_df):
     if chart.empty:
         st.info("Data encoder dan prediksi belum tersedia.")
         return
-    fig = px.line(chart.sort_values(["Series", "Step"]), x="Step", y="Harga",
-                  color="Series", markers=True,
-                  title="Gabungan Encoder dan Prediksi H+1 sampai H+3",
+    fig = px.line(chart.sort_values(["Series", "Step"]), x="Step", y="Harga", color="Series",
+                  markers=True, title="Gabungan Encoder dan Prediksi H+1 sampai H+3",
                   color_discrete_map=MODEL_COLORS)
     fig.update_traces(line=dict(width=4), marker=dict(size=10))
     ticks = list(range(-14, 4))
