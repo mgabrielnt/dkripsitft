@@ -1,5 +1,5 @@
 import streamlit as st
-from news_sections import show_daily_sentiment, show_labeling, show_news
+from news_sections import show_label_sentiment, show_news
 from style import header
 from ui import action_button
 from utils import filter_df
@@ -24,5 +24,4 @@ def render(data, ticker, dates):
     articles = filter_df(data["articles"], ticker, dates)
     daily = filter_df(data["daily"], ticker, dates)
     show_news(news)
-    show_labeling(articles)
-    show_daily_sentiment(daily)
+    show_label_sentiment(articles, daily)
