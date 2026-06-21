@@ -20,24 +20,16 @@ def date_col(df):
     if df is None:
         return None
     names = {"date", "targetdate", "publishedat", "publishdate", "datetime", "timestamp"}
-    for col in df.columns:
-        if norm(col) in names:
-            return col
-    return None
+    return next((col for col in df.columns if norm(col) in names), None)
 
 def find_col(df, candidates):
     if df is None:
         return None
     mapping = {norm(col): col for col in df.columns}
     for candidate in candidates:
-        key = norm(candidate)
-        if key in mapping:
-            return mapping[key]
-    for col in df.columns:
-        low = norm(col)
-        if any(norm(c) in low or low in norm(c) for c in candidates):
-            return col
-    return None
+        if norm(candidate) in mapping:
+            return mapping[norm(candidate)]
+    return next((col for col in df.columns if any(norm(c) in norm(col) or norm(col) in norm(c) for c in candidates)), None)
 
 def find_contains_col(df, include, exclude=None):
     if df is None:
@@ -53,9 +45,10 @@ def filter_df(df, ticker, dates):
     if df is None:
         return None
     out = df.copy()
-    if ticker != "Semua" and "ticker" in out.columns:
+    if ticker and "ticker" in out.columns:
         out = out[out["ticker"].astype(str).eq(str(ticker))]
     dc = date_col(out)
     if dc and dates and len(dates) == 2:
-        out = out[(out[dc] >= pd.to_datetime(dates[0])) & (out[dc] <= pd.to_datetime(dates[1]))]
+        start, end = pd.to_datetime(dates[0]), pd.to_datetime(dates[1])
+        out = out[(out[dc] >= start) & (out[dc] <= end)]
     return out
