@@ -36,6 +36,7 @@ CHECKPOINTS = [
 
 TECH_FEATURES = ["close", "volume", "log_return_1d", "log_return_2d", "vol_20", "rsi_14",
                  "ma_5_div_ma_20", "bb_width_20", "gap_return_1d", "intraday_range_pct"]
-SENT_FEATURES = ["news_count_3d", "sentiment_mean_3d", "sentiment_ema_7d",
-                 "sentiment_trend_7d", "sentiment_delta_1d", "sentiment_dir_signal"]
+SENT_FEATURES = ["news_count_3d", "sentiment_final_mean", "sentiment_mean_3d",
+                 "sentiment_ema_7d", "sentiment_trend_7d", "sentiment_delta_1d",
+                 "sentiment_dir_signal"]
 FINAL_LABELS = ["l_final", "final_label", "label_final", "sentiment_final", "sentiment"]
