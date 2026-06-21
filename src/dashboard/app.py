@@ -526,9 +526,65 @@ def get_selected_predictions(prediction_df):
 def show_prediction_chart(prediction_df):
     if prediction_df is None or prediction_df.empty:
         return
-    fig = px.bar(prediction_df, x="Horizon", y="Prediksi", color="Model_Normalized", barmode="group", title="Prediksi Multi-Horizon", color_discrete_map=MODEL_COLORS, text_auto=True)
-    fig.update_traces(texttemplate="Rp %{y:,.0f}", textposition="outside")
+    chart_df = prediction_df.copy()
+    chart_df["Horizon"] = pd.Categorical(chart_df["Horizon"], categories=["H+1", "H+2", "H+3"], ordered=True)
+    chart_df = chart_df.sort_values(["Model_Normalized", "Horizon"])
+    fig = px.line(chart_df, x="Horizon", y="Prediksi", color="Model_Normalized", markers=True, title="Prediksi Multi-Horizon", color_discrete_map=MODEL_COLORS)
+    fig.update_traces(line=dict(width=4), marker=dict(size=11))
+    fig.update_yaxes(title="Harga Prediksi")
     st.plotly_chart(layout(fig, 430), use_container_width=True)
+
+
+def build_encoder_df(df_master, ticker, dates, encoder_length=15):
+    df = filter_df(df_master, ticker, dates)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    if "ticker" in work.columns:
+        if ticker == "Semua":
+            sort_col = date_col(work) or "time_idx" if "time_idx" in work.columns else None
+            if sort_col:
+                latest_ticker = work.sort_values(sort_col).dropna(subset=["ticker"]).tail(1)["ticker"].iloc[0]
+            else:
+                latest_ticker = sorted(work["ticker"].dropna().astype(str).unique().tolist())[0]
+            work = work[work["ticker"].eq(latest_ticker)]
+    sort_columns = []
+    dc = date_col(work)
+    if dc:
+        sort_columns.append(dc)
+    elif "time_idx" in work.columns:
+        sort_columns.append("time_idx")
+    if sort_columns:
+        work = work.sort_values(sort_columns)
+    encoder = work.tail(encoder_length).copy()
+    if encoder.empty:
+        return encoder
+    encoder["Encoder Step"] = list(range(-len(encoder) + 1, 1))
+    if dc:
+        encoder["Tanggal"] = encoder[dc].dt.strftime("%Y-%m-%d")
+    else:
+        encoder["Tanggal"] = encoder.get("time_idx", encoder["Encoder Step"]).astype(str)
+    return encoder
+
+
+def show_encoder_panel(df_master, ticker, dates):
+    encoder_df = build_encoder_df(df_master, ticker, dates, encoder_length=15)
+    st.subheader("Data Encoder 15 Hari Terakhir")
+    if encoder_df is None or encoder_df.empty or "close" not in encoder_df.columns:
+        st.info("Data encoder 15 hari belum tersedia.")
+        return
+    fig_close = px.line(encoder_df, x="Encoder Step", y="close", markers=True, title="Close pada 15 Langkah Encoder", hover_data=["Tanggal"] if "Tanggal" in encoder_df.columns else None)
+    fig_close.update_traces(line=dict(color="#38BDF8", width=4), marker=dict(size=10))
+    fig_close.update_xaxes(dtick=1)
+    st.plotly_chart(layout(fig_close, 420), use_container_width=True)
+
+    feature_options = [col for col in TECHNICAL_FEATURES + SENTIMENT_FEATURES if col in encoder_df.columns and col != "close"]
+    if feature_options:
+        selected_encoder_feature = st.selectbox("Fitur encoder", feature_options)
+        fig_feature = px.line(encoder_df, x="Encoder Step", y=selected_encoder_feature, markers=True, title=f"{selected_encoder_feature} pada 15 Langkah Encoder", hover_data=["Tanggal"] if "Tanggal" in encoder_df.columns else None)
+        fig_feature.update_traces(line=dict(color="#F97316", width=4), marker=dict(size=10))
+        fig_feature.update_xaxes(dtick=1)
+        st.plotly_chart(layout(fig_feature, 380), use_container_width=True)
 
 
 def show_eval_section(title, df, scope, x_field=None):
@@ -665,6 +721,7 @@ if page == "Model dan Prediksi":
             card.metric(horizon, "-", "")
 
     show_prediction_chart(prediction_df)
+    show_encoder_panel(df_master, selected_ticker, selected_dates)
 
     if df_master is not None and not df_master.empty:
         dc = date_col(df_master) or "date"
