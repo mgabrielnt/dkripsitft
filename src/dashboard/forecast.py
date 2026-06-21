@@ -4,9 +4,12 @@ from utils import date_col, find_col, find_contains_col
 from forecast_model import load_tft, make_dataset
 
 def tensor_to_list(output):
-    arr = output.detach().cpu().numpy() if hasattr(output, "detach") else output
+    if hasattr(output, "output"):
+        output = output.output
+    if hasattr(output, "detach"):
+        output = output.detach().cpu().numpy()
     try:
-        return pd.Series(arr.reshape(-1)).dropna().astype(float).tolist()[:3]
+        return pd.Series(output.reshape(-1)).dropna().astype(float).tolist()[:3]
     except Exception:
         return []
 
@@ -23,8 +26,7 @@ def predict_checkpoints(master, ticker, cutoff):
                 out[key] = [None, None, None]
                 continue
             loader = dataset.to_dataloader(train=False, batch_size=1, num_workers=0)
-            infer = getattr(loaded, "predict")
-            values = tensor_to_list(infer(loader, mode="prediction", return_x=False))
+            values = tensor_to_list(loaded.predict(loader, mode="prediction", return_x=False))
             out[key] = values + [None] * (3 - len(values))
         except Exception:
             out[key] = [None, None, None]
@@ -63,5 +65,5 @@ def prediction_rows(checkpoint_preds, fallback):
             if val is not None:
                 rows.append({"Series": model.replace(" S5", "").replace(" S1", ""), "Step": int(h[-1]), "Harga": val})
     if not rows:
-        rows = [{"Series": "LLM-TFT", "Step": int(h[-1]), "Harga": v} for h, v in fallback.items() if v]
+        rows = [{"Series": "LLM-TFT", "Step": int(h[-1]), "Harga": v} for h, v in fallback.items() if v is not None]
     return pd.DataFrame(rows)
