@@ -8,46 +8,44 @@ import page_eval
 import page_price
 import page_news
 
-st.set_page_config(
-    page_title="Dashboard Prediksi Saham Indonesia",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+PAGES = ["Model dan Prediksi", "Evaluasi Model", "Data Harga Saham", "Berita Keuangan dan Sentimen"]
 
+st.set_page_config(page_title="Dashboard Prediksi Saham Indonesia", page_icon="📈", layout="wide")
 apply_style()
 data = load_data()
+
+
+def ticker_options(data):
+    source = data["master"] if data["master"] is not None and "ticker" in data["master"].columns else data["prices"]
+    if source is None or "ticker" not in source.columns:
+        return []
+    return sorted(source["ticker"].dropna().astype(str).unique().tolist())
+
+
+def date_filter(data):
+    source = data["master"] if data["master"] is not None and date_col(data["master"]) else data["prices"]
+    dc = date_col(source)
+    if source is None or not dc:
+        return None
+    valid = source[dc].dropna()
+    if valid.empty:
+        return None
+    start, end = valid.min(), valid.max()
+    if not (pd.notna(start) and pd.notna(end)):
+        return None
+    return st.date_input("Rentang Tanggal", value=(start.date(), end.date()), min_value=start.date(), max_value=end.date())
+
 
 with st.sidebar:
     st.markdown("## 📈 Prediksi Saham")
     st.caption("Dashboard TFT dan LLM-TFT")
     st.divider()
-    page = st.radio(
-        "Menu Dashboard",
-        ["Model dan Prediksi", "Evaluasi Model", "Data Harga Saham", "Berita Keuangan dan Sentimen"],
-    )
+    page = st.radio("Menu Dashboard", PAGES)
     st.divider()
     st.markdown("### Filter Data")
-    source = data["master"] if data["master"] is not None and "ticker" in data["master"].columns else data["prices"]
-    tickers = ["Semua"]
-    if source is not None and "ticker" in source.columns:
-        tickers += sorted(source["ticker"].dropna().astype(str).unique().tolist())
-    selected_ticker = st.selectbox("Emiten", tickers)
-    date_source = data["master"] if data["master"] is not None and date_col(data["master"]) else data["prices"]
-    selected_dates = None
-    dc = date_col(date_source)
-    if date_source is not None and dc:
-        valid_dates = date_source[dc].dropna()
-        if not valid_dates.empty:
-            min_date = valid_dates.min()
-            max_date = valid_dates.max()
-            if pd.notna(min_date) and pd.notna(max_date):
-                selected_dates = st.date_input(
-                    "Rentang Tanggal",
-                    value=(min_date.date(), max_date.date()),
-                    min_value=min_date.date(),
-                    max_value=max_date.date(),
-                )
+    tickers = ticker_options(data)
+    selected_ticker = st.selectbox("Emiten", tickers) if tickers else None
+    selected_dates = date_filter(data)
 
 if page == "Model dan Prediksi":
     page_model.render(data, selected_ticker, selected_dates)
