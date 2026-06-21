@@ -8,6 +8,7 @@ from style import header
 from ui import action_button, layout
 from utils import date_col, filter_df, fmt
 
+
 def selected_predictions(pred_df):
     if pred_df is None or pred_df.empty:
         return {"H+1": None, "H+2": None, "H+3": None}
@@ -15,17 +16,20 @@ def selected_predictions(pred_df):
     selected = selected if not selected.empty else pred_df
     return {f"H+{int(row.Step)}": row.Harga for row in selected.itertuples()}
 
-def sorted_model_data(df):
+
+def sorted_data(df):
     if df is None or df.empty:
         return df
     sort_col = date_col(df) or ("time_idx" if "time_idx" in df.columns else None)
     return df.sort_values(sort_col) if sort_col else df
 
-def latest_close_value(master):
+
+def latest_close(master):
     if master is None or master.empty or "close" not in master.columns:
         return None
-    close = sorted_model_data(master)["close"].dropna()
+    close = sorted_data(master)["close"].dropna()
     return float(close.tail(1).iloc[-1]) if not close.empty else None
+
 
 def render(data, ticker, dates):
     header("Model dan Prediksi")
@@ -41,29 +45,22 @@ def render(data, ticker, dates):
     cutoff = pd.to_datetime(master[dc]).max() if master is not None and not master.empty and dc else None
     pred_df = prediction_rows(predict_checkpoints(data["master"], ticker, cutoff), extract_predictions(pred_file))
     chosen = selected_predictions(pred_df)
-    latest_close = latest_close_value(master)
+    close = latest_close(master)
     cards = st.columns(4)
     cards[0].metric("Dataset", fmt(len(master) if master is not None else 0))
     for card, horizon in zip(cards[1:], ["H+1", "H+2", "H+3"]):
         value = chosen.get(horizon)
-        delta = f"{((value - latest_close) / latest_close) * 100:+.2f}%" if value and latest_close else None
+        delta = f"{((value - close) / close) * 100:+.2f}%" if value and close else None
         card.metric(horizon, f"Rp {fmt(value)}" if value else "-", delta)
     combined_chart(master, ticker, dates, pred_df)
-    show_dataset_charts(master)
+    show_split_chart(master)
 
-def show_dataset_charts(master):
-    if master is None or master.empty:
+
+def show_split_chart(master):
+    if master is None or master.empty or "split" not in master.columns:
         return
-    left, right = st.columns(2)
-    if "ticker" in master.columns:
-        count = master["ticker"].value_counts().reset_index()
-        count.columns = ["Ticker", "Jumlah"]
-        fig = px.pie(count, names="Ticker", values="Jumlah", title="Proporsi Dataset per Emiten",
-                     hole=0.5, color_discrete_sequence=COLORS)
-        left.plotly_chart(layout(fig), use_container_width=True)
-    if "split" in master.columns:
-        split = master["split"].value_counts().reset_index()
-        split.columns = ["Split", "Jumlah"]
-        fig = px.bar(split, x="Split", y="Jumlah", title="Distribusi Data Model",
-                     color="Split", color_discrete_sequence=COLORS, text_auto=True)
-        right.plotly_chart(layout(fig), use_container_width=True)
+    split = master["split"].value_counts().reset_index()
+    split.columns = ["Split", "Jumlah"]
+    fig = px.bar(split, x="Split", y="Jumlah", title="Distribusi Data Model",
+                 color="Split", color_discrete_sequence=COLORS, text_auto=True)
+    st.plotly_chart(layout(fig), use_container_width=True)
