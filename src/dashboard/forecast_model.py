@@ -6,9 +6,8 @@ from utils import date_col
 try:
     import torch, yaml
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-    from pytorch_forecasting.data import GroupNormalizer
 except Exception:
-    torch = yaml = TemporalFusionTransformer = TimeSeriesDataSet = GroupNormalizer = None
+    torch = yaml = TemporalFusionTransformer = TimeSeriesDataSet = None
 
 @st.cache_resource(show_spinner=False)
 def load_tft(path):
@@ -32,25 +31,25 @@ def prep_master(df):
     if df is None or df.empty or "ticker" not in df.columns or "close" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
+    out["ticker"] = out["ticker"].astype(str).str.upper()
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
     if "time_idx" not in out.columns:
-        sort_cols = [c for c in ["ticker", "date"] if c in out.columns]
-        out = out.sort_values(sort_cols) if sort_cols else out
-        out["time_idx"] = out.groupby("ticker").cumcount()
-    for col in ["ticker", "month", "day_of_week", "is_month_end"]:
+        out = out.sort_values([c for c in ["ticker", "date"] if c in out.columns])
+        out["time_idx"] = out.groupby("ticker").cumcount().astype("int64")
+    for col in ["ticker", "day_of_week", "month", "is_month_end"]:
         if col in out.columns:
             out[col] = out[col].astype(str)
     return out
 
 def make_dataset(df, ticker, cutoff, model_name):
-    if TimeSeriesDataSet is None or GroupNormalizer is None:
+    if TimeSeriesDataSet is None:
         return None
     enc, pred = model_config()
     work = prep_master(df)
     if work.empty:
         return None
-    selected = ticker or sorted(work["ticker"].dropna().unique())[0]
+    selected = str(ticker).upper() if ticker else sorted(work["ticker"].dropna().unique())[0]
     data = work[work["ticker"].eq(selected)].copy()
     dc = date_col(data)
     if cutoff is not None and dc:
@@ -58,19 +57,21 @@ def make_dataset(df, ticker, cutoff, model_name):
     data = data.sort_values("time_idx")
     if len(data) < enc + pred:
         return None
-    reals = [c for c in TECH_FEATURES if c in data.columns]
+    features = [c for c in TECH_FEATURES if c in data.columns]
     if model_name == "LLM-TFT":
-        reals += [c for c in SENT_FEATURES if c in data.columns]
-    cats = [c for c in ["day_of_week", "month", "is_month_end"] if c in data.columns]
-    return build_dataset(data.tail(enc + pred + 10), enc, pred, cats, reals)
+        features += [c for c in SENT_FEATURES if c in data.columns]
+    return build_dataset(data.tail(enc + pred + 10), enc, pred, features)
 
-def build_dataset(data, enc, pred, cats, reals):
+def build_dataset(data, enc, pred, features):
+    cats = [c for c in ["day_of_week", "month", "is_month_end"] if c in data.columns]
+    for col in features + ["close"]:
+        data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0.0).astype("float32")
     return TimeSeriesDataSet(
         data, time_idx="time_idx", target="close", group_ids=["ticker"],
-        min_encoder_length=enc, max_encoder_length=enc, max_prediction_length=pred,
+        min_encoder_length=enc, max_encoder_length=enc,
+        min_prediction_length=pred, max_prediction_length=pred,
         static_categoricals=["ticker"], time_varying_known_categoricals=cats,
-        time_varying_unknown_reals=reals,
-        target_normalizer=GroupNormalizer(groups=["ticker"], transformation="softplus"),
+        time_varying_unknown_reals=features,
         add_relative_time_idx=True, add_target_scales=True, add_encoder_length=True,
-        predict_mode=True,
+        allow_missing_timesteps=False, predict_mode=True,
     )
