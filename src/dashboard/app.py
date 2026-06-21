@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 from data_loader import load_data
 from style import apply_style
@@ -36,15 +37,17 @@ with st.sidebar:
     selected_dates = None
     dc = date_col(date_source)
     if date_source is not None and dc:
-        min_date = date_source[dc].min()
-        max_date = date_source[dc].max()
-        if min_date is not None and max_date is not None:
-            selected_dates = st.date_input(
-                "Rentang Tanggal",
-                value=(min_date.date(), max_date.date()),
-                min_value=min_date.date(),
-                max_value=max_date.date(),
-            )
+        valid_dates = date_source[dc].dropna()
+        if not valid_dates.empty:
+            min_date = valid_dates.min()
+            max_date = valid_dates.max()
+            if pd.notna(min_date) and pd.notna(max_date):
+                selected_dates = st.date_input(
+                    "Rentang Tanggal",
+                    value=(min_date.date(), max_date.date()),
+                    min_value=min_date.date(),
+                    max_value=max_date.date(),
+                )
 
 if page == "Model dan Prediksi":
     page_model.render(data, selected_ticker, selected_dates)
