@@ -1,6 +1,6 @@
 import pandas as pd
 import streamlit as st
-from config import CHECKPOINTS, CONFIG_PATH, TECH_FEATURES, SENT_FEATURES
+from config import CONFIG_PATH, TECH_FEATURES, SENT_FEATURES
 from utils import date_col
 
 try:
@@ -29,11 +29,14 @@ def model_config():
         return 15, 3
 
 def prep_master(df):
+    if df is None or df.empty or "ticker" not in df.columns or "close" not in df.columns:
+        return pd.DataFrame()
     out = df.copy()
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
     if "time_idx" not in out.columns:
-        out = out.sort_values(["ticker", "date"] if "date" in out.columns else ["ticker"])
+        sort_cols = [c for c in ["ticker", "date"] if c in out.columns]
+        out = out.sort_values(sort_cols) if sort_cols else out
         out["time_idx"] = out.groupby("ticker").cumcount()
     for col in ["ticker", "month", "day_of_week", "is_month_end"]:
         if col in out.columns:
@@ -45,6 +48,8 @@ def make_dataset(df, ticker, cutoff, model_name):
         return None
     enc, pred = model_config()
     work = prep_master(df)
+    if work.empty:
+        return None
     ticker = sorted(work["ticker"].dropna().unique())[0] if ticker == "Semua" else ticker
     data = work[work["ticker"].eq(ticker)].copy()
     dc = date_col(data)
@@ -57,7 +62,9 @@ def make_dataset(df, ticker, cutoff, model_name):
     if model_name == "LLM-TFT":
         reals += [c for c in SENT_FEATURES if c in data.columns]
     cats = [c for c in ["day_of_week", "month", "is_month_end"] if c in data.columns]
-    data = data.tail(enc + pred + 10)
+    return build_dataset(data.tail(enc + pred + 10), enc, pred, cats, reals)
+
+def build_dataset(data, enc, pred, cats, reals):
     return TimeSeriesDataSet(
         data, time_idx="time_idx", target="close", group_ids=["ticker"],
         min_encoder_length=enc, max_encoder_length=enc, max_prediction_length=pred,
