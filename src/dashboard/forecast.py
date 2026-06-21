@@ -3,6 +3,7 @@ from config import CHECKPOINTS
 from utils import date_col, find_col, find_contains_col
 from forecast_model import load_tft, make_dataset
 
+
 def tensor_to_list(output):
     if hasattr(output, "output"):
         output = output.output
@@ -12,6 +13,7 @@ def tensor_to_list(output):
         return pd.Series(output.reshape(-1)).dropna().astype(float).tolist()[:3]
     except Exception:
         return []
+
 
 def predict_checkpoints(master, ticker, cutoff):
     out = {}
@@ -32,6 +34,7 @@ def predict_checkpoints(master, ticker, cutoff):
             out[key] = [None, None, None]
     return out
 
+
 def extract_predictions(df):
     result = {"H+1": None, "H+2": None, "H+3": None}
     if df is None or df.empty:
@@ -47,6 +50,10 @@ def extract_predictions(df):
             result[horizon] = None if val.empty else float(val.iloc[-1])
     if any(v is not None for v in result.values()):
         return result
+    return extract_long_predictions(work, result)
+
+
+def extract_long_predictions(work, result):
     hcol = find_col(work, ["horizon", "h", "step", "forecast_horizon"])
     pcol = find_col(work, ["prediction", "predicted", "y_pred", "pred", "forecast"])
     pcol = pcol or find_contains_col(work, ["pred"], ["error"])
@@ -58,12 +65,21 @@ def extract_predictions(df):
             result[f"H+{i}"] = None if val.empty else float(val.iloc[-1])
     return result
 
+
 def prediction_rows(checkpoint_preds, fallback):
+    rows = checkpoint_rows(checkpoint_preds)
+    has_llm = any(row["Series"] == "LLM-TFT" for row in rows)
+    fallback_rows = [{"Series": "LLM-TFT", "Step": int(h[-1]), "Harga": v} for h, v in fallback.items() if v is not None]
+    if fallback_rows and not has_llm:
+        rows.extend(fallback_rows)
+    return pd.DataFrame(rows)
+
+
+def checkpoint_rows(checkpoint_preds):
     rows = []
     for model, values in checkpoint_preds.items():
+        series = model.replace(" S5", "").replace(" S1", "")
         for h, val in zip(["H+1", "H+2", "H+3"], values):
             if val is not None:
-                rows.append({"Series": model.replace(" S5", "").replace(" S1", ""), "Step": int(h[-1]), "Harga": val})
-    if not rows:
-        rows = [{"Series": "LLM-TFT", "Step": int(h[-1]), "Harga": v} for h, v in fallback.items() if v is not None]
-    return pd.DataFrame(rows)
+                rows.append({"Series": series, "Step": int(h[-1]), "Harga": val})
+    return rows
