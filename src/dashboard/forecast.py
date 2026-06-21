@@ -1,18 +1,20 @@
 import pandas as pd
 from config import CHECKPOINTS
-from utils import date_col, find_col, find_contains_col
+from utils import date_col, find_col, find_contains_col, norm
 from forecast_model import load_tft, make_dataset
 
 MODEL_COLS = ["model", "model_name", "scenario", "skenario", "method", "metode", "variant", "architecture"]
 HORIZON_COLS = ["horizon", "h", "step", "forecast_horizon", "prediction_horizon"]
 PRED_COLS = ["prediction", "predicted", "y_pred", "pred", "forecast", "pred_close"]
+LLM_KEYS = ["llmtft", "llm", "hybrid", "sent", "s1"]
+TFT_KEYS = ["tft", "baseline", "base", "s5"]
 
 
 def normalize_model(value):
     low = str(value).lower()
-    if "llm" in low or "hybrid" in low or "sent" in low or "s1" in low:
+    if any(key in low for key in ["llm", "hybrid", "sent", "s1"]):
         return "LLM-TFT"
-    if "tft" in low or "base" in low or "s5" in low:
+    if any(key in low for key in ["tft", "base", "s5"]):
         return "TFT"
     return str(value)
 
@@ -53,6 +55,9 @@ def extract_predictions(df, preferred_model="LLM-TFT"):
     if df is None or df.empty:
         return result
     work = prepare_prediction_frame(df, preferred_model)
+    result = extract_model_wide_predictions(work, result)
+    if any(v is not None for v in result.values()):
+        return result
     result = extract_wide_predictions(work, result)
     return result if any(v is not None for v in result.values()) else extract_long_predictions(work, result)
 
@@ -68,11 +73,33 @@ def prepare_prediction_frame(df, preferred_model):
     return work
 
 
+def extract_model_wide_predictions(work, result):
+    for step in [1, 2, 3]:
+        col = find_model_prediction_col(work, step, LLM_KEYS)
+        if col and pd.api.types.is_numeric_dtype(work[col]):
+            val = work[col].dropna().tail(1)
+            result[f"H+{step}"] = None if val.empty else float(val.iloc[-1])
+    return result
+
+
+def find_model_prediction_col(work, step, model_keys):
+    horizon_keys = [f"h{step}", f"horizon{step}", f"pred{step}", f"prediction{step}", f"{step}"]
+    pred_keys = ["pred", "prediction", "forecast", "yhat", "ypred"]
+    for col in work.columns:
+        low = norm(col)
+        has_model = any(key in low for key in model_keys)
+        has_horizon = any(key in low for key in horizon_keys)
+        has_pred = any(key in low for key in pred_keys)
+        if has_model and has_horizon and has_pred:
+            return col
+    return None
+
+
 def extract_wide_predictions(work, result):
     wide = {
-        "H+1": ["llm_tft_h1", "llm_h1", "pred_h1", "prediction_h1", "h1_pred", "H+1"],
-        "H+2": ["llm_tft_h2", "llm_h2", "pred_h2", "prediction_h2", "h2_pred", "H+2"],
-        "H+3": ["llm_tft_h3", "llm_h3", "pred_h3", "prediction_h3", "h3_pred", "H+3"],
+        "H+1": ["llm_tft_pred_h1", "llm_tft_h1", "hybrid_pred_h1", "llm_h1", "pred_h1", "prediction_h1", "h1_pred", "H+1"],
+        "H+2": ["llm_tft_pred_h2", "llm_tft_h2", "hybrid_pred_h2", "llm_h2", "pred_h2", "prediction_h2", "h2_pred", "H+2"],
+        "H+3": ["llm_tft_pred_h3", "llm_tft_h3", "hybrid_pred_h3", "llm_h3", "pred_h3", "prediction_h3", "h3_pred", "H+3"],
     }
     for horizon, cols in wide.items():
         col = find_col(work, cols)
