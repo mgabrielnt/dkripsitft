@@ -1,10 +1,6 @@
-import os
-import sys
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -38,18 +34,21 @@ PRICE_PATHS = [
 NEWS_PATHS = [
     INTERIM_DIR / "news_clean.csv",
     PROCESSED_DIR / "news_clean.csv",
-    PROCESSED_DIR / "news_with_sentiment_per_article.csv",
     DATA_DIR / "news_clean.csv",
 ]
 
 ARTICLE_SENTIMENT_PATHS = [
     PROCESSED_DIR / "news_with_sentiment_per_article.csv",
     INTERIM_DIR / "news_with_sentiment_per_article.csv",
+    PROCESSED_DIR / "article_sentiment.csv",
+    INTERIM_DIR / "article_sentiment.csv",
 ]
 
 DAILY_SENTIMENT_PATHS = [
     PROCESSED_DIR / "daily_sentiment.csv",
     INTERIM_DIR / "daily_sentiment.csv",
+    PROCESSED_DIR / "sentiment_daily.csv",
+    INTERIM_DIR / "sentiment_daily.csv",
 ]
 
 MASTER_PATHS = [
@@ -120,6 +119,46 @@ SENTIMENT_FEATURES = [
     "sentiment_dir_signal",
 ]
 
+LLM_LABEL_COLUMNS = [
+    "l_text",
+    "l_llm",
+    "llm_label",
+    "label_llm",
+    "sentiment_llm",
+    "llm_sentiment",
+    "gpt_label",
+    "gpt_sentiment",
+]
+
+LEXICON_LABEL_COLUMNS = [
+    "l_lex",
+    "l_lexicon",
+    "lexicon_label",
+    "label_lexicon",
+    "sentiment_lexicon",
+    "lex_label",
+    "lex_sentiment",
+]
+
+MARKET_LABEL_COLUMNS = [
+    "l_market",
+    "l_response",
+    "l_resp",
+    "market_label",
+    "label_market",
+    "sentiment_market",
+    "market_response_label",
+    "response_label",
+]
+
+FINAL_LABEL_COLUMNS = [
+    "l_final",
+    "final_label",
+    "label_final",
+    "sentiment_final",
+    "sentiment",
+]
+
 
 # ============================================================
 # 2. STYLE DASHBOARD
@@ -159,21 +198,6 @@ st.markdown(
         font-size: 2.05rem;
         letter-spacing: -0.04em;
         color: #f8fafc;
-    }
-
-    .main-title p {
-        margin: 8px 0 0 0;
-        color: #cbd5e1;
-        font-size: 0.98rem;
-    }
-
-    .section-card {
-        padding: 18px 20px;
-        border-radius: 20px;
-        background: rgba(15, 23, 42, 0.78);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        box-shadow: 0 14px 35px rgba(0, 0, 0, 0.22);
-        margin-bottom: 18px;
     }
 
     .mini-card {
@@ -218,33 +242,12 @@ st.markdown(
         color: #f8fafc;
     }
 
-    .step-card span {
-        color: #cbd5e1;
-        font-size: 0.9rem;
-    }
-
-    .status-ok {
-        color: #34d399;
-        font-weight: 700;
-    }
-
-    .status-warn {
-        color: #fbbf24;
-        font-weight: 700;
-    }
-
     div[data-testid="stMetric"] {
         background: rgba(15, 23, 42, 0.78);
         border: 1px solid rgba(148, 163, 184, 0.18);
         padding: 15px 16px;
         border-radius: 18px;
         box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
-    }
-
-    .stDataFrame {
-        border-radius: 18px;
-        overflow: hidden;
-        border: 1px solid rgba(148, 163, 184, 0.16);
     }
 
     .block-container {
@@ -258,7 +261,7 @@ st.markdown(
 
 
 # ============================================================
-# 3. UTILITAS DATA
+# 3. UTILITAS
 # ============================================================
 def first_existing(paths: list[Path]) -> Path | None:
     for path in paths:
@@ -274,7 +277,6 @@ def read_csv(path: str | Path | None) -> pd.DataFrame | None:
     file_path = Path(path)
     if not file_path.exists():
         return None
-
     try:
         df = pd.read_csv(file_path)
     except Exception:
@@ -304,24 +306,34 @@ def format_number(value, decimals: int = 0) -> str:
 def get_date_col(df: pd.DataFrame | None) -> str | None:
     if df is None:
         return None
-    candidates = ["date", "published_at", "publish_date", "datetime", "timestamp"]
-    for col in candidates:
+    for col in ["date", "published_at", "publish_date", "datetime", "timestamp"]:
         if col in df.columns:
             return col
     return None
 
 
-def filter_by_sidebar(df: pd.DataFrame | None, ticker: str | None, date_range: tuple | None) -> pd.DataFrame | None:
+def find_col(df: pd.DataFrame | None, candidates: list[str]) -> str | None:
     if df is None:
         return None
+    lower_map = {col.lower(): col for col in df.columns}
+    for col in candidates:
+        if col.lower() in lower_map:
+            return lower_map[col.lower()]
+    return None
 
+
+def filter_data(df: pd.DataFrame | None, ticker: str | None, date_range: tuple | None) -> pd.DataFrame | None:
+    if df is None:
+        return None
     out = df.copy()
+
     if ticker and ticker != "Semua" and "ticker" in out.columns:
         out = out[out["ticker"] == ticker]
 
     date_col = get_date_col(out)
     if date_col and date_range and len(date_range) == 2:
-        start, end = pd.to_datetime(date_range[0]), pd.to_datetime(date_range[1])
+        start = pd.to_datetime(date_range[0])
+        end = pd.to_datetime(date_range[1])
         out = out[(out[date_col] >= start) & (out[date_col] <= end)]
 
     return out
@@ -360,9 +372,9 @@ def run_command(command: str):
     if result.returncode == 0:
         st.success("Proses selesai.")
     else:
-        st.error("Proses gagal. Periksa pesan error di bawah.")
+        st.error("Proses gagal.")
 
-    with st.expander("Lihat log terminal"):
+    with st.expander("Log terminal"):
         if result.stdout:
             st.code(result.stdout[-8000:])
         if result.stderr:
@@ -370,30 +382,22 @@ def run_command(command: str):
 
 
 def action_button(label: str, command_key: str):
-    command = PIPELINE_COMMANDS[command_key]
     if st.button(label, use_container_width=True):
-        run_command(command)
+        run_command(PIPELINE_COMMANDS[command_key])
 
 
-def data_status(path: Path | None) -> str:
-    if path and path.exists():
-        return f"<span class='status-ok'>Tersedia</span><br><small>{path.relative_to(PROJECT_ROOT)}</small>"
-    return "<span class='status-warn'>Belum tersedia</span><br><small>Jalankan pipeline terkait</small>"
-
-
-def render_header(title: str, subtitle: str):
+def render_header(title: str):
     st.markdown(
         f"""
         <div class="main-title">
             <h1>{title}</h1>
-            <p>{subtitle}</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_metric_card(title: str, value: str, note: str):
+def render_metric_card(title: str, value: str, note: str = ""):
     st.markdown(
         f"""
         <div class="mini-card">
@@ -406,12 +410,11 @@ def render_metric_card(title: str, value: str, note: str):
     )
 
 
-def render_process_step(number: int, title: str, desc: str):
+def render_step(number: int, title: str):
     st.markdown(
         f"""
         <div class="step-card">
-            <b>{number}. {title}</b><br>
-            <span>{desc}</span>
+            <b>{number}. {title}</b>
         </div>
         """,
         unsafe_allow_html=True,
@@ -419,7 +422,7 @@ def render_process_step(number: int, title: str, desc: str):
 
 
 # ============================================================
-# 4. LOAD DATA GLOBAL
+# 4. LOAD DATA
 # ============================================================
 price_path = first_existing(PRICE_PATHS)
 news_path = first_existing(NEWS_PATHS)
@@ -457,9 +460,7 @@ with st.sidebar:
             "Data Harga Saham",
             "Data Berita Keuangan",
             "Sentimen Harian",
-            "Dataset Model",
-            "Pelatihan dan Prediksi",
-            "Evaluasi dan Backtest",
+            "Model, Prediksi, dan Evaluasi",
         ],
     )
 
@@ -468,11 +469,11 @@ with st.sidebar:
 
     ticker_source = master if master is not None and "ticker" in master.columns else prices
     if ticker_source is not None and "ticker" in ticker_source.columns:
-        tickers = ["Semua"] + sorted(ticker_source["ticker"].dropna().astype(str).unique().tolist())
+        ticker_options = ["Semua"] + sorted(ticker_source["ticker"].dropna().astype(str).unique().tolist())
     else:
-        tickers = ["Semua"]
+        ticker_options = ["Semua"]
 
-    selected_ticker = st.selectbox("Emiten", tickers)
+    selected_ticker = st.selectbox("Emiten", ticker_options)
 
     date_source = master if master is not None and get_date_col(master) else prices
     date_col_sidebar = get_date_col(date_source)
@@ -489,107 +490,77 @@ with st.sidebar:
                 max_value=max_date.date(),
             )
 
-    st.divider()
-    st.markdown("### Status File")
-    st.markdown(f"**Harga:** {data_status(price_path)}", unsafe_allow_html=True)
-    st.markdown(f"**Berita:** {data_status(news_path)}", unsafe_allow_html=True)
-    st.markdown(f"**Sentimen:** {data_status(daily_sentiment_path)}", unsafe_allow_html=True)
-    st.markdown(f"**Dataset:** {data_status(master_path)}", unsafe_allow_html=True)
-    st.markdown(f"**Evaluasi:** {data_status(eval_global_path)}", unsafe_allow_html=True)
-
 
 # ============================================================
-# 6. HALAMAN RINGKASAN
+# 6. RINGKASAN SISTEM
 # ============================================================
 if page == "Ringkasan Sistem":
-    render_header(
-        "Dashboard Prediksi Harga Saham Indonesia",
-        "Monitoring profesional untuk data harga, berita keuangan, sentimen, dataset model, pelatihan, prediksi, evaluasi, dan backtest.",
-    )
+    render_header("Dashboard Prediksi Harga Saham Indonesia")
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        render_metric_card("Data Harga", format_number(len(prices) if prices is not None else 0), "baris harga dan indikator")
+        render_metric_card("Data Harga", format_number(len(prices) if prices is not None else 0), "baris")
     with c2:
-        render_metric_card("Data Berita", format_number(len(news) if news is not None else 0), "baris berita keuangan")
+        render_metric_card("Data Berita", format_number(len(news) if news is not None else 0), "baris")
     with c3:
-        render_metric_card("Sentimen Harian", format_number(len(daily_sentiment) if daily_sentiment is not None else 0), "baris agregasi sentimen")
+        render_metric_card("Sentimen Harian", format_number(len(daily_sentiment) if daily_sentiment is not None else 0), "baris")
     with c4:
-        render_metric_card("Dataset Model", format_number(len(master) if master is not None else 0), "baris tft_master")
+        render_metric_card("Dataset Model", format_number(len(master) if master is not None else 0), "baris")
 
-    st.write("")
+    st.subheader("Alur Sistem")
+    s1, s2 = st.columns(2)
+    with s1:
+        render_step(1, "Pengolahan Data Harga Saham")
+        render_step(2, "Pengolahan Data Berita Keuangan")
+        render_step(3, "Pelabelan dan Agregasi Sentimen")
+    with s2:
+        render_step(4, "Pembentukan Dataset Model")
+        render_step(5, "Pelatihan Model Prediksi")
+        render_step(6, "Evaluasi dan Penyajian Hasil")
 
-    left, right = st.columns([1.05, 1.2])
-    with left:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.subheader("Alur Sistem")
-        steps = [
-            ("Pengolahan Data Harga Saham", "Mengambil harga harian, menghitung indikator teknikal, dan melakukan audit kalender perdagangan."),
-            ("Pengolahan Data Berita Keuangan", "Mengumpulkan, menggabungkan, dan membersihkan berita dari beberapa sumber."),
-            ("Pelabelan dan Agregasi Sentimen", "Memberi label artikel dengan LLM, leksikon, dan respons pasar, lalu membentuk fitur harian."),
-            ("Pembentukan Dataset Model", "Menggabungkan harga, indikator teknikal, kalender, dan sentimen ke dataset master."),
-            ("Pelatihan Model Prediksi", "Melatih TFT dan LLM-TFT untuk horizon H+1, H+2, dan H+3."),
-            ("Evaluasi dan Penyajian Hasil", "Membandingkan model dengan MAE, RMSE, MAPE, R², Directional Accuracy, dan backtest."),
-        ]
-        for i, (title, desc) in enumerate(steps, start=1):
-            render_process_step(i, title, desc)
-        st.markdown("</div>", unsafe_allow_html=True)
+    component_status = pd.DataFrame(
+        {
+            "Komponen": ["Harga", "Berita", "Sentimen Artikel", "Sentimen Harian", "Dataset", "Evaluasi"],
+            "Status": [
+                "Tersedia" if prices is not None else "Belum tersedia",
+                "Tersedia" if news is not None else "Belum tersedia",
+                "Tersedia" if article_sentiment is not None else "Belum tersedia",
+                "Tersedia" if daily_sentiment is not None else "Belum tersedia",
+                "Tersedia" if master is not None else "Belum tersedia",
+                "Tersedia" if eval_global is not None else "Belum tersedia",
+            ],
+        }
+    )
+    fig_status = px.pie(component_status, names="Status", title="Status Komponen Sistem", hole=0.55)
+    st.plotly_chart(plot_layout(fig_status, 360), use_container_width=True)
 
-    with right:
-        st.markdown('<div class="section-card">', unsafe_allow_html=True)
-        st.subheader("Kesiapan Komponen Sistem")
-        status_df = pd.DataFrame(
-            {
-                "Komponen": ["Harga", "Berita", "Sentimen Artikel", "Sentimen Harian", "Dataset Master", "Evaluasi"],
-                "Status": [
-                    "Tersedia" if price_path else "Belum tersedia",
-                    "Tersedia" if news_path else "Belum tersedia",
-                    "Tersedia" if article_sentiment_path else "Belum tersedia",
-                    "Tersedia" if daily_sentiment_path else "Belum tersedia",
-                    "Tersedia" if master_path else "Belum tersedia",
-                    "Tersedia" if eval_global_path else "Belum tersedia",
-                ],
-            }
-        )
-        fig = px.pie(status_df, names="Status", title="Status File Utama", hole=0.55)
-        st.plotly_chart(plot_layout(fig, 350), use_container_width=True)
-
-        if eval_global is not None and not eval_global.empty:
-            metric_cols = [c for c in ["MAE", "RMSE", "MAPE", "R2", "R²", "Directional Accuracy", "DirAcc"] if c in eval_global.columns]
-            model_col = "model" if "model" in eval_global.columns else "Model" if "Model" in eval_global.columns else None
-            if model_col and metric_cols:
-                chosen_metric = "RMSE" if "RMSE" in metric_cols else metric_cols[0]
-                fig_metric = px.bar(eval_global, x=model_col, y=chosen_metric, title=f"Perbandingan Model Berdasarkan {chosen_metric}")
-                st.plotly_chart(plot_layout(fig_metric, 330), use_container_width=True)
-            else:
-                st.dataframe(eval_global, use_container_width=True, hide_index=True)
-        else:
-            st.info("File evaluasi belum ditemukan. Jalankan evaluasi model untuk menampilkan perbandingan TFT dan LLM-TFT.")
-        st.markdown("</div>", unsafe_allow_html=True)
+    if eval_global is not None and not eval_global.empty:
+        model_col = find_col(eval_global, ["model", "Model"])
+        metric_col = find_col(eval_global, ["RMSE", "MAE", "MAPE", "Directional Accuracy", "DirAcc"])
+        if model_col and metric_col:
+            fig_metric = px.bar(eval_global, x=model_col, y=metric_col, title=f"Perbandingan Model Berdasarkan {metric_col}")
+            st.plotly_chart(plot_layout(fig_metric, 380), use_container_width=True)
 
 
 # ============================================================
-# 7. HALAMAN DATA HARGA
+# 7. DATA HARGA SAHAM
 # ============================================================
 elif page == "Data Harga Saham":
-    render_header(
-        "Pengolahan Data Harga Saham",
-        "Halaman ini menampilkan harga harian, volume, indikator teknikal, audit kalender, dan tombol proses untuk membangun input teknikal model.",
-    )
+    render_header("Pengolahan Data Harga Saham")
 
-    with st.expander("Jalankan proses data harga", expanded=False):
+    with st.expander("Jalankan Proses"):
         b1, b2, b3 = st.columns(3)
         with b1:
-            action_button("Ambil harga Yahoo Finance", "Ambil harga Yahoo Finance")
+            action_button("Ambil Harga", "Ambil harga Yahoo Finance")
         with b2:
-            action_button("Hitung indikator teknikal", "Hitung indikator teknikal")
+            action_button("Hitung Indikator", "Hitung indikator teknikal")
         with b3:
-            action_button("Audit kalender harga", "Audit kalender harga")
+            action_button("Audit Kalender", "Audit kalender harga")
 
-    df_price = filter_by_sidebar(prices, selected_ticker, date_range)
+    df_price = filter_data(prices, selected_ticker, date_range)
 
     if df_price is None or df_price.empty:
-        st.warning("Data harga belum tersedia. Jalankan proses harga terlebih dahulu.")
+        st.warning("Data harga belum tersedia.")
     else:
         date_col = get_date_col(df_price) or "date"
         latest = df_price.sort_values(date_col).tail(1).iloc[0]
@@ -600,22 +571,34 @@ elif page == "Data Harga Saham":
         c3.metric("Close Terakhir", f"Rp {format_number(latest['close'])}" if "close" in df_price.columns else "-")
         c4.metric("Volume Terakhir", format_number(latest["volume"]) if "volume" in df_price.columns else "-")
 
-        tab1, tab2, tab3 = st.tabs(["Grafik Harga", "Indikator Teknikal", "Tabel Data"])
+        tab1, tab2 = st.tabs(["Grafik Harga", "Indikator Teknikal"])
 
         with tab1:
             chart_df = df_price.sort_values(date_col)
             if "close" in chart_df.columns:
-                fig = px.line(chart_df, x=date_col, y="close", color="ticker" if selected_ticker == "Semua" and "ticker" in chart_df.columns else None, title="Pergerakan Harga Penutupan")
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
+                fig_close = px.line(
+                    chart_df,
+                    x=date_col,
+                    y="close",
+                    color="ticker" if selected_ticker == "Semua" and "ticker" in chart_df.columns else None,
+                    title="Harga Penutupan",
+                )
+                st.plotly_chart(plot_layout(fig_close), use_container_width=True)
 
             if "volume" in chart_df.columns:
-                fig_vol = px.bar(chart_df.tail(250), x=date_col, y="volume", color="ticker" if selected_ticker == "Semua" and "ticker" in chart_df.columns else None, title="Volume Transaksi")
-                st.plotly_chart(plot_layout(fig_vol, 360), use_container_width=True)
+                fig_volume = px.bar(
+                    chart_df.tail(250),
+                    x=date_col,
+                    y="volume",
+                    color="ticker" if selected_ticker == "Semua" and "ticker" in chart_df.columns else None,
+                    title="Volume Transaksi",
+                )
+                st.plotly_chart(plot_layout(fig_volume, 360), use_container_width=True)
 
         with tab2:
             available_tech = [col for col in TECHNICAL_FEATURES if col in df_price.columns]
             if available_tech:
-                selected_feature = st.selectbox("Pilih indikator", available_tech, index=0)
+                selected_feature = st.selectbox("Indikator", available_tech, index=0)
                 fig_feature = px.line(
                     df_price.sort_values(date_col),
                     x=date_col,
@@ -630,39 +613,32 @@ elif page == "Data Harga Saham":
                     corr = df_price[corr_cols].corr(numeric_only=True)
                     fig_corr = px.imshow(corr, text_auto=".2f", title="Korelasi Indikator Teknikal")
                     st.plotly_chart(plot_layout(fig_corr, 520), use_container_width=True)
-            else:
-                st.info("Kolom indikator teknikal belum ditemukan pada data harga.")
-
-        with tab3:
-            st.dataframe(df_price.tail(500), use_container_width=True, hide_index=True)
 
 
 # ============================================================
-# 8. HALAMAN DATA BERITA
+# 8. DATA BERITA KEUANGAN
 # ============================================================
 elif page == "Data Berita Keuangan":
-    render_header(
-        "Pengolahan Data Berita Keuangan",
-        "Halaman ini digunakan untuk memantau pengumpulan, penggabungan, dan pembersihan berita keuangan sebagai sumber informasi eksternal.",
-    )
+    render_header("Pengolahan Data Berita Keuangan")
 
-    with st.expander("Jalankan proses berita", expanded=False):
+    with st.expander("Jalankan Proses"):
         b1, b2, b3, b4 = st.columns(4)
         with b1:
             action_button("Ambil RSS/Google", "Ambil berita RSS dan Google News")
         with b2:
             action_button("Ambil Yahoo", "Ambil berita Yahoo Finance")
         with b3:
-            action_button("Gabung berita", "Gabung sumber berita")
+            action_button("Gabung Berita", "Gabung sumber berita")
         with b4:
-            action_button("Bersihkan berita", "Bersihkan teks berita")
+            action_button("Bersihkan Berita", "Bersihkan teks berita")
 
-    df_news = filter_by_sidebar(news, selected_ticker, date_range)
+    df_news = filter_data(news, selected_ticker, date_range)
 
     if df_news is None or df_news.empty:
-        st.warning("Data berita belum tersedia. Jalankan proses berita terlebih dahulu.")
+        st.warning("Data berita belum tersedia.")
     else:
         date_col = get_date_col(df_news)
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Jumlah Berita", format_number(len(df_news)))
         c2.metric("Jumlah Emiten", format_number(df_news["ticker"].nunique() if "ticker" in df_news.columns else 0))
@@ -670,18 +646,17 @@ elif page == "Data Berita Keuangan":
         c4.metric("Kolom Data", format_number(len(df_news.columns)))
 
         left, right = st.columns(2)
-
         with left:
             if "source" in df_news.columns:
                 source_count = df_news["source"].fillna("Tidak diketahui").value_counts().reset_index()
                 source_count.columns = ["Sumber", "Jumlah"]
-                fig = px.bar(source_count.head(15), x="Sumber", y="Jumlah", title="Jumlah Berita per Sumber")
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
+                fig_source = px.bar(source_count.head(15), x="Sumber", y="Jumlah", title="Jumlah Berita per Sumber")
+                st.plotly_chart(plot_layout(fig_source), use_container_width=True)
             elif "ticker" in df_news.columns:
                 ticker_count = df_news["ticker"].value_counts().reset_index()
                 ticker_count.columns = ["Ticker", "Jumlah"]
-                fig = px.pie(ticker_count, names="Ticker", values="Jumlah", title="Proporsi Berita per Emiten", hole=0.45)
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
+                fig_ticker = px.pie(ticker_count, names="Ticker", values="Jumlah", title="Proporsi Berita per Emiten", hole=0.45)
+                st.plotly_chart(plot_layout(fig_ticker), use_container_width=True)
 
         with right:
             if date_col:
@@ -692,281 +667,205 @@ elif page == "Data Berita Keuangan":
                     .size()
                     .reset_index(name="Jumlah")
                 )
-                fig = px.area(daily_news, x="day", y="Jumlah", title="Tren Jumlah Berita Harian")
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
-            elif "ticker" in df_news.columns:
-                ticker_count = df_news["ticker"].value_counts().reset_index()
-                ticker_count.columns = ["Ticker", "Jumlah"]
-                fig = px.bar(ticker_count, x="Ticker", y="Jumlah", title="Jumlah Berita per Emiten")
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
-
-        st.subheader("Preview Data Berita")
-        preview_cols = [c for c in ["date", "published_at", "ticker", "source", "title", "description", "clean_text", "text_for_label"] if c in df_news.columns]
-        st.dataframe(df_news[preview_cols].tail(500) if preview_cols else df_news.tail(500), use_container_width=True, hide_index=True)
+                fig_daily = px.area(daily_news, x="day", y="Jumlah", title="Tren Jumlah Berita Harian")
+                st.plotly_chart(plot_layout(fig_daily), use_container_width=True)
 
 
 # ============================================================
-# 9. HALAMAN SENTIMEN
+# 9. SENTIMEN HARIAN
 # ============================================================
 elif page == "Sentimen Harian":
-    render_header(
-        "Pelabelan dan Agregasi Sentimen",
-        "Halaman ini menampilkan hasil label sentimen per artikel dan fitur sentimen harian yang dipakai pada model LLM-TFT.",
-    )
+    render_header("Pelabelan dan Agregasi Sentimen")
 
-    with st.expander("Jalankan proses sentimen", expanded=False):
+    with st.expander("Jalankan Proses"):
         b1, b2 = st.columns(2)
         with b1:
-            action_button("Label sentimen artikel", "Label sentimen artikel")
+            action_button("Label Sentimen", "Label sentimen artikel")
         with b2:
-            action_button("Agregasi sentimen harian", "Agregasi sentimen harian")
+            action_button("Agregasi Harian", "Agregasi sentimen harian")
 
-    df_article = filter_by_sidebar(article_sentiment, selected_ticker, date_range)
-    df_daily = filter_by_sidebar(daily_sentiment, selected_ticker, date_range)
+    df_article = filter_data(article_sentiment, selected_ticker, date_range)
+    df_daily = filter_data(daily_sentiment, selected_ticker, date_range)
 
-    t1, t2 = st.tabs(["Sentimen Artikel", "Sentimen Harian"])
+    tab1, tab2 = st.tabs(["Sentimen Artikel", "Sentimen Harian"])
 
-    with t1:
+    with tab1:
         if df_article is None or df_article.empty:
             st.warning("Data sentimen artikel belum tersedia.")
         else:
+            llm_col = find_col(df_article, LLM_LABEL_COLUMNS)
+            lex_col = find_col(df_article, LEXICON_LABEL_COLUMNS)
+            market_col = find_col(df_article, MARKET_LABEL_COLUMNS)
+            final_col = find_col(df_article, FINAL_LABEL_COLUMNS)
+
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Jumlah Artikel", format_number(len(df_article)))
-            c2.metric("LLM Label", "Ada" if "l_text" in df_article.columns else "Tidak ada")
-            c3.metric("Leksikon", "Ada" if "l_lex" in df_article.columns else "Tidak ada")
-            c4.metric("Respons Pasar", "Ada" if "l_market" in df_article.columns else "Tidak ada")
+            c2.metric("LLM Label", "Ada" if llm_col else "Belum terdeteksi")
+            c3.metric("Leksikon", "Ada" if lex_col else "Belum terdeteksi")
+            c4.metric("Respons Pasar", "Ada" if market_col else "Belum terdeteksi")
 
-            label_col = "l_final" if "l_final" in df_article.columns else "sentiment" if "sentiment" in df_article.columns else None
-            if label_col:
+            if final_col:
                 label_map = {-1: "Negatif", 0: "Netral", 1: "Positif", "-1": "Negatif", "0": "Netral", "1": "Positif"}
-                sentiment_count = df_article[label_col].map(label_map).fillna(df_article[label_col].astype(str)).value_counts().reset_index()
+                sentiment_count = df_article[final_col].map(label_map).fillna(df_article[final_col].astype(str)).value_counts().reset_index()
                 sentiment_count.columns = ["Sentimen", "Jumlah"]
-                fig = px.pie(sentiment_count, names="Sentimen", values="Jumlah", title="Distribusi Label Sentimen Artikel", hole=0.5)
-                st.plotly_chart(plot_layout(fig, 430), use_container_width=True)
+                fig_label = px.pie(sentiment_count, names="Sentimen", values="Jumlah", title="Distribusi Sentimen Artikel", hole=0.5)
+                st.plotly_chart(plot_layout(fig_label, 430), use_container_width=True)
 
-            preview_cols = [c for c in ["date", "published_at", "ticker", "title", "l_text", "l_lex", "l_market", "l_final", "sentiment_conf"] if c in df_article.columns]
-            st.dataframe(df_article[preview_cols].tail(500) if preview_cols else df_article.tail(500), use_container_width=True, hide_index=True)
+            label_sources = []
+            if llm_col:
+                label_sources.append("LLM")
+            if lex_col:
+                label_sources.append("Leksikon")
+            if market_col:
+                label_sources.append("Respons Pasar")
+            if label_sources:
+                source_df = pd.DataFrame({"Metode": label_sources, "Jumlah": [1] * len(label_sources)})
+                fig_sources = px.pie(source_df, names="Metode", values="Jumlah", title="Metode Pelabelan Terdeteksi", hole=0.45)
+                st.plotly_chart(plot_layout(fig_sources, 360), use_container_width=True)
 
-    with t2:
+    with tab2:
         if df_daily is None or df_daily.empty:
             st.warning("Data sentimen harian belum tersedia.")
         else:
             date_col = get_date_col(df_daily) or "date"
+
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Baris Sentimen Harian", format_number(len(df_daily)))
+            c1.metric("Baris Sentimen", format_number(len(df_daily)))
             c2.metric("Jumlah Emiten", format_number(df_daily["ticker"].nunique() if "ticker" in df_daily.columns else 0))
-            c3.metric("Rata-rata News Count", format_number(df_daily["news_count_3d"].mean(), 2) if "news_count_3d" in df_daily.columns else "-")
+            c3.metric("News Count", format_number(df_daily["news_count_3d"].mean(), 2) if "news_count_3d" in df_daily.columns else "-")
             c4.metric("Rata-rata Sentimen", format_number(df_daily["sentiment_mean_3d"].mean(), 3) if "sentiment_mean_3d" in df_daily.columns else "-")
 
             available_sent = [col for col in SENTIMENT_FEATURES if col in df_daily.columns]
             if available_sent:
-                selected_sent_feature = st.selectbox("Pilih fitur sentimen", available_sent)
-                fig = px.line(
+                selected_sent_feature = st.selectbox("Fitur Sentimen", available_sent)
+                fig_sent = px.line(
                     df_daily.sort_values(date_col),
                     x=date_col,
                     y=selected_sent_feature,
                     color="ticker" if selected_ticker == "Semua" and "ticker" in df_daily.columns else None,
                     title=f"Tren {selected_sent_feature}",
                 )
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
+                st.plotly_chart(plot_layout(fig_sent), use_container_width=True)
 
                 if "ticker" in df_daily.columns:
                     agg = df_daily.groupby("ticker")[selected_sent_feature].mean().reset_index()
-                    fig_bar = px.bar(agg, x="ticker", y=selected_sent_feature, title=f"Rata-rata {selected_sent_feature} per Emiten")
-                    st.plotly_chart(plot_layout(fig_bar, 360), use_container_width=True)
-
-            st.dataframe(df_daily.tail(500), use_container_width=True, hide_index=True)
+                    fig_agg = px.bar(agg, x="ticker", y=selected_sent_feature, title=f"Rata-rata {selected_sent_feature} per Emiten")
+                    st.plotly_chart(plot_layout(fig_agg, 360), use_container_width=True)
 
 
 # ============================================================
-# 10. HALAMAN DATASET MODEL
+# 10. MODEL, PREDIKSI, DAN EVALUASI
 # ============================================================
-elif page == "Dataset Model":
-    render_header(
-        "Pembentukan Dataset Model",
-        "Halaman ini memeriksa dataset master yang menggabungkan data harga, indikator teknikal, fitur kalender, dan fitur sentimen harian.",
-    )
+elif page == "Model, Prediksi, dan Evaluasi":
+    render_header("Model, Prediksi, dan Evaluasi")
 
-    with st.expander("Jalankan pembentukan dataset", expanded=False):
-        action_button("Bangun dataset master TFT", "Bangun dataset master")
+    with st.expander("Jalankan Proses"):
+        b1, b2, b3, b4, b5, b6 = st.columns(6)
+        with b1:
+            action_button("Dataset", "Bangun dataset master")
+        with b2:
+            action_button("Latih TFT", "Latih TFT")
+        with b3:
+            action_button("Latih LLM-TFT", "Latih LLM-TFT")
+        with b4:
+            action_button("Evaluasi", "Evaluasi model")
+        with b5:
+            action_button("Backtest", "Backtest model")
+        with b6:
+            action_button("Interpretasi", "Interpretasi model")
 
-    df_master = filter_by_sidebar(master, selected_ticker, date_range)
+    df_master = filter_data(master, selected_ticker, date_range)
+    df_backtest = filter_data(backtest, selected_ticker, date_range)
 
-    if df_master is None or df_master.empty:
-        st.warning("Dataset master belum tersedia. Jalankan pembentukan dataset terlebih dahulu.")
-    else:
+    baseline_ckpt = list((MODELS_DIR / "baseline").glob("**/*.ckpt")) if (MODELS_DIR / "baseline").exists() else []
+    hybrid_ckpt = list((MODELS_DIR / "hybrid").glob("**/*.ckpt")) if (MODELS_DIR / "hybrid").exists() else []
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Dataset", format_number(len(df_master) if df_master is not None else 0))
+    c2.metric("Checkpoint TFT", format_number(len(baseline_ckpt)))
+    c3.metric("Checkpoint LLM-TFT", format_number(len(hybrid_ckpt)))
+    c4.metric("Missing Value", format_number(int(df_master.isna().sum().sum())) if df_master is not None and not df_master.empty else "-")
+
+    if df_master is not None and not df_master.empty:
         date_col = get_date_col(df_master) or "date"
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Jumlah Baris", format_number(len(df_master)))
-        c2.metric("Jumlah Kolom", format_number(len(df_master.columns)))
-        c3.metric("Jumlah Emiten", format_number(df_master["ticker"].nunique() if "ticker" in df_master.columns else 0))
-        c4.metric("Missing Value", format_number(int(df_master.isna().sum().sum())))
-
         left, right = st.columns(2)
 
         with left:
             if "ticker" in df_master.columns:
                 count_ticker = df_master["ticker"].value_counts().reset_index()
                 count_ticker.columns = ["Ticker", "Jumlah"]
-                fig = px.pie(count_ticker, names="Ticker", values="Jumlah", title="Proporsi Data per Emiten", hole=0.5)
-                st.plotly_chart(plot_layout(fig), use_container_width=True)
+                fig_ticker = px.pie(count_ticker, names="Ticker", values="Jumlah", title="Proporsi Dataset per Emiten", hole=0.5)
+                st.plotly_chart(plot_layout(fig_ticker), use_container_width=True)
 
         with right:
-            feature_status = pd.DataFrame(
-                {
-                    "Fitur": TECHNICAL_FEATURES + SENTIMENT_FEATURES,
-                    "Status": ["Tersedia" if col in df_master.columns else "Belum ada" for col in TECHNICAL_FEATURES + SENTIMENT_FEATURES],
-                    "Jenis": ["Teknikal"] * len(TECHNICAL_FEATURES) + ["Sentimen"] * len(SENTIMENT_FEATURES),
-                }
-            )
-            status_count = feature_status.groupby(["Jenis", "Status"]).size().reset_index(name="Jumlah")
-            fig = px.bar(status_count, x="Jenis", y="Jumlah", color="Status", barmode="group", title="Kelengkapan Fitur Model")
-            st.plotly_chart(plot_layout(fig), use_container_width=True)
+            if "split" in df_master.columns:
+                split_count = df_master["split"].value_counts().reset_index()
+                split_count.columns = ["Split", "Jumlah"]
+                fig_split = px.bar(split_count, x="Split", y="Jumlah", title="Distribusi Data Model")
+                st.plotly_chart(plot_layout(fig_split), use_container_width=True)
+            elif date_col:
+                timeline = (
+                    df_master.dropna(subset=[date_col])
+                    .assign(month=lambda x: pd.to_datetime(x[date_col]).dt.to_period("M").astype(str))
+                    .groupby("month")
+                    .size()
+                    .reset_index(name="Jumlah")
+                )
+                fig_timeline = px.area(timeline, x="month", y="Jumlah", title="Distribusi Dataset Berdasarkan Waktu")
+                st.plotly_chart(plot_layout(fig_timeline), use_container_width=True)
 
-        if "split" in df_master.columns:
-            split_count = df_master["split"].value_counts().reset_index()
-            split_count.columns = ["Split", "Jumlah"]
-            fig_split = px.bar(split_count, x="Split", y="Jumlah", title="Distribusi Train, Validation, dan Test")
-            st.plotly_chart(plot_layout(fig_split, 360), use_container_width=True)
-        elif date_col:
-            timeline_count = (
-                df_master.dropna(subset=[date_col])
-                .assign(month=lambda x: pd.to_datetime(x[date_col]).dt.to_period("M").astype(str))
-                .groupby("month")
-                .size()
-                .reset_index(name="Jumlah")
-            )
-            fig_time = px.area(timeline_count, x="month", y="Jumlah", title="Distribusi Data Berdasarkan Waktu")
-            st.plotly_chart(plot_layout(fig_time, 360), use_container_width=True)
+    st.subheader("Evaluasi Model")
+    if eval_global is not None and not eval_global.empty:
+        model_col = find_col(eval_global, ["model", "Model"])
+        available_metrics = [m for m in ["MAE", "RMSE", "MAPE", "R2", "R²", "Directional Accuracy", "DirAcc"] if m in eval_global.columns]
 
-        st.subheader("Preview Dataset Master")
-        st.dataframe(df_master.tail(500), use_container_width=True, hide_index=True)
+        if model_col and available_metrics:
+            metric_choice = st.selectbox("Metrik", available_metrics, index=available_metrics.index("RMSE") if "RMSE" in available_metrics else 0)
+            fig_eval = px.bar(eval_global, x=model_col, y=metric_choice, title=f"Perbandingan Model Berdasarkan {metric_choice}", text_auto=True)
+            st.plotly_chart(plot_layout(fig_eval), use_container_width=True)
 
+    left, right = st.columns(2)
+    with left:
+        if eval_ticker is not None and not eval_ticker.empty:
+            ticker_col = find_col(eval_ticker, ["ticker", "Ticker"])
+            model_col = find_col(eval_ticker, ["model", "Model"])
+            metric_col = find_col(eval_ticker, ["RMSE", "MAE", "MAPE"])
+            if ticker_col and model_col and metric_col:
+                fig_ticker_eval = px.bar(
+                    eval_ticker,
+                    x=ticker_col,
+                    y=metric_col,
+                    color=model_col,
+                    barmode="group",
+                    title=f"{metric_col} per Emiten",
+                )
+                st.plotly_chart(plot_layout(fig_ticker_eval, 420), use_container_width=True)
 
-# ============================================================
-# 11. HALAMAN PELATIHAN DAN PREDIKSI
-# ============================================================
-elif page == "Pelatihan dan Prediksi":
-    render_header(
-        "Pelatihan Model Prediksi",
-        "Halaman ini menyediakan tombol pelatihan TFT dan LLM-TFT serta ringkasan prediksi jika file backtest atau hasil prediksi tersedia.",
-    )
-
-    with st.expander("Jalankan pelatihan dan interpretasi model", expanded=False):
-        b1, b2, b3 = st.columns(3)
-        with b1:
-            action_button("Latih TFT", "Latih TFT")
-        with b2:
-            action_button("Latih LLM-TFT", "Latih LLM-TFT")
-        with b3:
-            action_button("Interpretasi model", "Interpretasi model")
-
-    st.subheader("Status Model")
-    baseline_ckpt = list((MODELS_DIR / "baseline").glob("**/*.ckpt")) if (MODELS_DIR / "baseline").exists() else []
-    hybrid_ckpt = list((MODELS_DIR / "hybrid").glob("**/*.ckpt")) if (MODELS_DIR / "hybrid").exists() else []
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Checkpoint TFT", format_number(len(baseline_ckpt)))
-    c2.metric("Checkpoint LLM-TFT", format_number(len(hybrid_ckpt)))
-    c3.metric("Dataset Master", "Tersedia" if master_path else "Belum tersedia")
-
-    df_backtest = filter_by_sidebar(backtest, selected_ticker, date_range)
+    with right:
+        if eval_horizon is not None and not eval_horizon.empty:
+            horizon_col = find_col(eval_horizon, ["horizon", "Horizon"])
+            model_col = find_col(eval_horizon, ["model", "Model"])
+            metric_col = find_col(eval_horizon, ["RMSE", "MAE", "MAPE"])
+            if horizon_col and model_col and metric_col:
+                fig_horizon = px.line(
+                    eval_horizon,
+                    x=horizon_col,
+                    y=metric_col,
+                    color=model_col,
+                    markers=True,
+                    title=f"{metric_col} Berdasarkan Horizon",
+                )
+                st.plotly_chart(plot_layout(fig_horizon, 420), use_container_width=True)
 
     if df_backtest is not None and not df_backtest.empty:
-        st.subheader("Visualisasi Prediksi dan Backtest")
         date_col = get_date_col(df_backtest)
-        y_actual = next((c for c in ["actual", "Actual", "y_true", "close", "target"] if c in df_backtest.columns), None)
-        y_pred = next((c for c in ["prediction", "predicted", "y_pred", "pred", "LLM-TFT", "llm_tft"] if c in df_backtest.columns), None)
+        actual_col = find_col(df_backtest, ["actual", "Actual", "y_true", "close", "target"])
+        pred_col = find_col(df_backtest, ["prediction", "predicted", "y_pred", "pred", "LLM-TFT", "llm_tft"])
 
-        if date_col and y_actual and y_pred:
+        if date_col and actual_col and pred_col:
             plot_df = df_backtest.sort_values(date_col).tail(250)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=plot_df[date_col], y=plot_df[y_actual], mode="lines", name="Aktual"))
-            fig.add_trace(go.Scatter(x=plot_df[date_col], y=plot_df[y_pred], mode="lines", name="Prediksi"))
-            fig.update_layout(title="Actual vs Predicted")
-            st.plotly_chart(plot_layout(fig), use_container_width=True)
-        else:
-            st.dataframe(df_backtest.tail(500), use_container_width=True, hide_index=True)
-    else:
-        st.info("File backtest/prediksi belum ditemukan. Jalankan evaluasi backtest untuk menampilkan grafik Actual vs Predicted.")
-
-    st.subheader("Konfigurasi Model yang Ditampilkan")
-    st.markdown(
-        """
-        - **TFT** memakai data harga, indikator teknikal, dan fitur kalender.
-        - **LLM-TFT** memakai data harga, indikator teknikal, fitur kalender, dan fitur sentimen harian.
-        - Horizon prediksi diarahkan untuk **H+1, H+2, dan H+3**.
-        - Model terbaik dapat dibandingkan melalui halaman evaluasi.
-        """
-    )
-
-
-# ============================================================
-# 12. HALAMAN EVALUASI DAN BACKTEST
-# ============================================================
-elif page == "Evaluasi dan Backtest":
-    render_header(
-        "Evaluasi dan Penyajian Hasil",
-        "Halaman ini membandingkan model TFT dan LLM-TFT menggunakan MAE, RMSE, MAPE, R², Directional Accuracy, serta hasil backtest.",
-    )
-
-    with st.expander("Jalankan evaluasi", expanded=False):
-        b1, b2 = st.columns(2)
-        with b1:
-            action_button("Evaluasi model", "Evaluasi model")
-        with b2:
-            action_button("Backtest model", "Backtest model")
-
-    if eval_global is None or eval_global.empty:
-        st.warning("File evaluasi global belum tersedia.")
-    else:
-        st.subheader("Evaluasi Global")
-        clean_eval = eval_global.drop(columns=[c for c in ["n", "n_diracc", "split"] if c in eval_global.columns], errors="ignore")
-        st.dataframe(clean_eval, use_container_width=True, hide_index=True)
-
-        model_col = "model" if "model" in clean_eval.columns else "Model" if "Model" in clean_eval.columns else None
-        metrics = [m for m in ["MAE", "RMSE", "MAPE", "R2", "R²", "Directional Accuracy", "DirAcc"] if m in clean_eval.columns]
-
-        if model_col and metrics:
-            metric_choice = st.selectbox("Pilih metrik evaluasi", metrics, index=metrics.index("RMSE") if "RMSE" in metrics else 0)
-            fig = px.bar(clean_eval, x=model_col, y=metric_choice, title=f"Perbandingan Model Berdasarkan {metric_choice}", text_auto=True)
-            st.plotly_chart(plot_layout(fig), use_container_width=True)
-
-    v1, v2 = st.columns(2)
-    with v1:
-        st.subheader("Evaluasi per Emiten")
-        if eval_ticker is not None and not eval_ticker.empty:
-            ticker_eval = eval_ticker.drop(columns=[c for c in ["n", "n_diracc", "split"] if c in eval_ticker.columns], errors="ignore")
-            st.dataframe(ticker_eval, use_container_width=True, hide_index=True)
-
-            ticker_col = "ticker" if "ticker" in ticker_eval.columns else "Ticker" if "Ticker" in ticker_eval.columns else None
-            model_col = "model" if "model" in ticker_eval.columns else "Model" if "Model" in ticker_eval.columns else None
-            if ticker_col and model_col and "RMSE" in ticker_eval.columns:
-                fig = px.bar(ticker_eval, x=ticker_col, y="RMSE", color=model_col, barmode="group", title="RMSE per Emiten")
-                st.plotly_chart(plot_layout(fig, 420), use_container_width=True)
-        else:
-            st.info("File evaluasi per emiten belum tersedia.")
-
-    with v2:
-        st.subheader("Evaluasi per Horizon")
-        if eval_horizon is not None and not eval_horizon.empty:
-            horizon_eval = eval_horizon.drop(columns=[c for c in ["n", "n_diracc", "split"] if c in eval_horizon.columns], errors="ignore")
-            st.dataframe(horizon_eval, use_container_width=True, hide_index=True)
-
-            horizon_col = "horizon" if "horizon" in horizon_eval.columns else "Horizon" if "Horizon" in horizon_eval.columns else None
-            model_col = "model" if "model" in horizon_eval.columns else "Model" if "Model" in horizon_eval.columns else None
-            if horizon_col and model_col and "RMSE" in horizon_eval.columns:
-                fig = px.line(horizon_eval, x=horizon_col, y="RMSE", color=model_col, markers=True, title="RMSE Berdasarkan Horizon")
-                st.plotly_chart(plot_layout(fig, 420), use_container_width=True)
-        else:
-            st.info("File evaluasi per horizon belum tersedia.")
-
-    st.subheader("Catatan Interpretasi")
-    st.markdown(
-        """
-        Evaluasi utama menggunakan **MAE**, **RMSE**, **MAPE**, **R²**, dan **Directional Accuracy**.
-        Nilai error yang lebih rendah menunjukkan prediksi harga yang lebih dekat dengan data aktual.
-        Nilai **R²** yang lebih tinggi menunjukkan kemampuan model menjelaskan variasi harga.
-        Nilai **Directional Accuracy** yang lebih tinggi menunjukkan kemampuan model membaca arah pergerakan harga.
-        """
-    )
+            fig_backtest = go.Figure()
+            fig_backtest.add_trace(go.Scatter(x=plot_df[date_col], y=plot_df[actual_col], mode="lines", name="Aktual"))
+            fig_backtest.add_trace(go.Scatter(x=plot_df[date_col], y=plot_df[pred_col], mode="lines", name="Prediksi"))
+            fig_backtest.update_layout(title="Actual vs Predicted")
+            st.plotly_chart(plot_layout(fig_backtest), use_container_width=True)
