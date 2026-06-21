@@ -5,16 +5,18 @@ from config import MODEL_COLORS
 from ui import layout
 from utils import date_col, filter_df
 
+
 def sort_column(df):
     return date_col(df) or ("time_idx" if df is not None and "time_idx" in df.columns else None)
+
 
 def encoder_df(master, ticker, dates, n=15):
     df = filter_df(master, ticker, dates)
     if df is None or df.empty or "close" not in df.columns:
         return pd.DataFrame()
     work = df.copy()
-    sort_col = sort_column(work)
-    if "ticker" in work.columns and ticker == "Semua":
+    if "ticker" in work.columns and not ticker:
+        sort_col = sort_column(work)
         tick = work.sort_values(sort_col).tail(1)["ticker"].iloc[0] if sort_col else work["ticker"].iloc[0]
         work = work[work["ticker"].eq(tick)]
     sort_col = sort_column(work)
@@ -26,6 +28,7 @@ def encoder_df(master, ticker, dates, n=15):
     enc["Harga"] = enc["close"]
     enc["Series"] = "Encoder 15 Hari"
     return enc[["Step", "Harga", "Series"]]
+
 
 def combined_chart(master, ticker, dates, pred_df):
     rows = []
