@@ -482,6 +482,15 @@ def tensor_to_list(output) -> list[float]:
 def predict_checkpoints(master: pd.DataFrame | None, ticker: str | None, cutoff) -> tuple[pd.DataFrame, list[str]]:
     rows: list[dict] = []
     errors: list[str] = []
+
+    # Di Streamlit Cloud, jangan load checkpoint otomatis karena startup bisa timeout.
+    # Dashboard tetap menampilkan data, metrik evaluasi, gambar prediksi, dan analisis.
+    if Path("/mount/src").exists():
+        return pd.DataFrame(), [
+            "Prediksi checkpoint dinonaktifkan di Streamlit Cloud agar aplikasi tidak timeout. "
+            "Gunakan hasil evaluasi, grafik prediksi, dan file CSV/gambar yang sudah tersedia."
+        ]
+
     if master is None or master.empty:
         return pd.DataFrame(), ["dataset master belum tersedia"]
 
