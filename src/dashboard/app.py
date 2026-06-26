@@ -365,7 +365,12 @@ def load_tft(path_text: str):
         if isinstance(ckpt, dict):
             hparams = ckpt.get("hyper_parameters", {})
             if isinstance(hparams, dict):
-                hparams.pop("mask_bias", None)
+                for bad_key in [
+                    "mask_bias",
+                    "dataset_parameters",
+                    "logging_metrics",
+                ]:
+                    hparams.pop(bad_key, None)
 
             clean_dir = ROOT / ".streamlit_ckpt_cache"
             clean_dir.mkdir(parents=True, exist_ok=True)
