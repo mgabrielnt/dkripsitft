@@ -359,6 +359,27 @@ def load_tft(path_text: str):
     if not path.exists():
         return None, f"checkpoint tidak ditemukan: {path}"
 
+    def remove_key_recursive(obj, target_key: str) -> int:
+        removed = 0
+
+        if isinstance(obj, dict):
+            if target_key in obj:
+                obj.pop(target_key, None)
+                removed += 1
+
+            for value in list(obj.values()):
+                removed += remove_key_recursive(value, target_key)
+
+        elif isinstance(obj, list):
+            for item in obj:
+                removed += remove_key_recursive(item, target_key)
+
+        elif isinstance(obj, tuple):
+            for item in obj:
+                removed += remove_key_recursive(item, target_key)
+
+        return removed
+
     try:
         ckpt = torch.load(str(path), map_location=torch.device("cpu"), weights_only=False)
 
@@ -370,11 +391,6 @@ def load_tft(path_text: str):
             model.eval()
             return model, None
 
-        hparams = ckpt.get("hyper_parameters", {})
-        if not isinstance(hparams, dict):
-            hparams = {}
-            ckpt["hyper_parameters"] = hparams
-
         removed_keys = []
 
         for bad_key in [
@@ -383,9 +399,9 @@ def load_tft(path_text: str):
             "logging_metrics",
             "monotone_constraints",
         ]:
-            if bad_key in hparams:
-                hparams.pop(bad_key, None)
-                removed_keys.append(bad_key)
+            count = remove_key_recursive(ckpt, bad_key)
+            if count > 0:
+                removed_keys.append(f"{bad_key}({count})")
 
         clean_dir = ROOT / ".streamlit_ckpt_cache"
         clean_dir.mkdir(parents=True, exist_ok=True)
@@ -393,7 +409,7 @@ def load_tft(path_text: str):
 
         last_error = None
 
-        for _ in range(30):
+        for _ in range(50):
             torch.save(ckpt, clean_path)
 
             try:
@@ -410,24 +426,34 @@ def load_tft(path_text: str):
 
                 marker = "unexpected keyword argument '"
                 if marker not in msg:
-                    return None, f"gagal load checkpoint: TypeError: {msg}"
+                    return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
 
                 bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
 
                 if not bad_key:
-                    return None, f"gagal load checkpoint: TypeError: {msg}"
+                    return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
 
-                if bad_key in hparams:
-                    hparams.pop(bad_key, None)
-                    removed_keys.append(bad_key)
-                    continue
+                count = remove_key_recursive(ckpt, bad_key)
+                removed_keys.append(f"{bad_key}({count})")
 
-                return None, f"gagal load checkpoint: TypeError: {msg}"
+                if count == 0:
+                    return None, (
+                        f"gagal load checkpoint: TypeError: {msg}. "
+                        f"Parameter tidak ditemukan saat recursive-clean. Parameter dihapus: {removed_keys}"
+                    )
+
+                continue
 
             except Exception as exc:
-                return None, f"gagal load checkpoint: {type(exc).__name__}: {exc}"
+                return None, (
+                    f"gagal load checkpoint: {type(exc).__name__}: {exc}. "
+                    f"Parameter dihapus: {removed_keys}"
+                )
 
-        return None, f"gagal load checkpoint setelah auto-clean. Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
+        return None, (
+            f"gagal load checkpoint setelah auto-clean. "
+            f"Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
+        )
 
     except Exception as exc:
         return None, f"gagal membaca checkpoint: {type(exc).__name__}: {exc}"
