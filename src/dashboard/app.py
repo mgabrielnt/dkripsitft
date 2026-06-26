@@ -14,12 +14,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+IMPORT_MODEL_ERROR = None
+
 try:
     import torch
     import yaml
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
     from pytorch_forecasting.data import GroupNormalizer
-except Exception:  # dashboard tetap bisa membuka data/evaluasi walaupun library model belum tersedia
+except Exception as exc:
+    IMPORT_MODEL_ERROR = f"{type(exc).__name__}: {exc}"
     torch = None
     yaml = None
     TemporalFusionTransformer = None
@@ -350,7 +353,7 @@ def prep_master_for_model(df: pd.DataFrame | None) -> pd.DataFrame:
 def load_tft(path_text: str):
     path = Path(path_text)
     if TemporalFusionTransformer is None or torch is None:
-        return None, "pytorch_forecasting atau torch belum tersedia."
+        return None, f"pytorch_forecasting atau torch belum tersedia. Detail: {IMPORT_MODEL_ERROR}"
     if not path.exists():
         return None, f"checkpoint tidak ditemukan: {path}"
     try:
