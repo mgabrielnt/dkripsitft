@@ -11,9 +11,9 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 
 torch==2.4.1
-lightning==2.3.3
-pytorch-lightning==2.3.3
+lightning==2.6.0
+pytorch-lightning==2.6.0
 pytorch-forecasting==1.0.0
 torchmetrics==1.4.0
-scikit-learn==1.5.1
+scikit-learn==1.7.2
 setuptools==70.3.0
