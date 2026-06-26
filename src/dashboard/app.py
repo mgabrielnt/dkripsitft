@@ -362,33 +362,76 @@ def load_tft(path_text: str):
     try:
         ckpt = torch.load(str(path), map_location=torch.device("cpu"), weights_only=False)
 
-        if isinstance(ckpt, dict):
-            hparams = ckpt.get("hyper_parameters", {})
-            if isinstance(hparams, dict):
-                for bad_key in [
-                    "mask_bias",
-                    "dataset_parameters",
-                    "logging_metrics",
-                ]:
-                    hparams.pop(bad_key, None)
+        if not isinstance(ckpt, dict):
+            model = TemporalFusionTransformer.load_from_checkpoint(
+                str(path),
+                map_location=torch.device("cpu"),
+            )
+            model.eval()
+            return model, None
 
-            clean_dir = ROOT / ".streamlit_ckpt_cache"
-            clean_dir.mkdir(parents=True, exist_ok=True)
-            clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_clean.ckpt"
+        hparams = ckpt.get("hyper_parameters", {})
+        if not isinstance(hparams, dict):
+            hparams = {}
+            ckpt["hyper_parameters"] = hparams
+
+        removed_keys = []
+
+        for bad_key in [
+            "mask_bias",
+            "dataset_parameters",
+            "logging_metrics",
+            "monotone_constraints",
+        ]:
+            if bad_key in hparams:
+                hparams.pop(bad_key, None)
+                removed_keys.append(bad_key)
+
+        clean_dir = ROOT / ".streamlit_ckpt_cache"
+        clean_dir.mkdir(parents=True, exist_ok=True)
+        clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_clean.ckpt"
+
+        last_error = None
+
+        for _ in range(30):
             torch.save(ckpt, clean_path)
-        else:
-            clean_path = path
 
-        model = TemporalFusionTransformer.load_from_checkpoint(
-            str(clean_path),
-            map_location=torch.device("cpu"),
-        )
-        model.eval()
-        return model, None
+            try:
+                model = TemporalFusionTransformer.load_from_checkpoint(
+                    str(clean_path),
+                    map_location=torch.device("cpu"),
+                )
+                model.eval()
+                return model, None
+
+            except TypeError as exc:
+                msg = str(exc)
+                last_error = msg
+
+                marker = "unexpected keyword argument '"
+                if marker not in msg:
+                    return None, f"gagal load checkpoint: TypeError: {msg}"
+
+                bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
+
+                if not bad_key:
+                    return None, f"gagal load checkpoint: TypeError: {msg}"
+
+                if bad_key in hparams:
+                    hparams.pop(bad_key, None)
+                    removed_keys.append(bad_key)
+                    continue
+
+                return None, f"gagal load checkpoint: TypeError: {msg}"
+
+            except Exception as exc:
+                return None, f"gagal load checkpoint: {type(exc).__name__}: {exc}"
+
+        return None, f"gagal load checkpoint setelah auto-clean. Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
 
     except Exception as exc:
-        return None, f"gagal load checkpoint: {type(exc).__name__}: {exc}"
-
+        return None, f"gagal membaca checkpoint: {type(exc).__name__}: {exc}"
+    
 @st.cache_data(show_spinner=False)
 def model_config() -> tuple[int, int]:
     if yaml is None or not CONFIG_PATH.exists():
