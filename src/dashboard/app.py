@@ -352,18 +352,27 @@ def prep_master_for_model(df: pd.DataFrame | None) -> pd.DataFrame:
 @st.cache_resource(show_spinner=False)
 def load_tft(path_text: str):
     path = Path(path_text)
+
     if TemporalFusionTransformer is None or torch is None:
         return None, f"pytorch_forecasting atau torch belum tersedia. Detail: {IMPORT_MODEL_ERROR}"
+
     if not path.exists():
         return None, f"checkpoint tidak ditemukan: {path}"
-    try:
-        model = TemporalFusionTransformer.load_from_checkpoint(str(path), map_location=torch.device("cpu"), weights_only=False)
-    except TypeError:
-        model = TemporalFusionTransformer.load_from_checkpoint(str(path), map_location=torch.device("cpu"))
-    except Exception as exc:
-        return None, f"gagal load checkpoint: {type(exc).__name__}: {exc}"
-    model.eval()
-    return model, None
+
+    errors = []
+
+    for kwargs in [
+        {"map_location": torch.device("cpu"), "weights_only": False},
+        {"map_location": torch.device("cpu")},
+    ]:
+        try:
+            model = TemporalFusionTransformer.load_from_checkpoint(str(path), **kwargs)
+            model.eval()
+            return model, None
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    return None, "gagal load checkpoint: " + " | ".join(errors)
 
 
 @st.cache_data(show_spinner=False)
