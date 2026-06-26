@@ -359,21 +359,30 @@ def load_tft(path_text: str):
     if not path.exists():
         return None, f"checkpoint tidak ditemukan: {path}"
 
-    errors = []
+    try:
+        ckpt = torch.load(str(path), map_location=torch.device("cpu"), weights_only=False)
 
-    for kwargs in [
-        {"map_location": torch.device("cpu"), "weights_only": False},
-        {"map_location": torch.device("cpu")},
-    ]:
-        try:
-            model = TemporalFusionTransformer.load_from_checkpoint(str(path), **kwargs)
-            model.eval()
-            return model, None
-        except Exception as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
+        if isinstance(ckpt, dict):
+            hparams = ckpt.get("hyper_parameters", {})
+            if isinstance(hparams, dict):
+                hparams.pop("mask_bias", None)
 
-    return None, "gagal load checkpoint: " + " | ".join(errors)
+            clean_dir = ROOT / ".streamlit_ckpt_cache"
+            clean_dir.mkdir(parents=True, exist_ok=True)
+            clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_clean.ckpt"
+            torch.save(ckpt, clean_path)
+        else:
+            clean_path = path
 
+        model = TemporalFusionTransformer.load_from_checkpoint(
+            str(clean_path),
+            map_location=torch.device("cpu"),
+        )
+        model.eval()
+        return model, None
+
+    except Exception as exc:
+        return None, f"gagal load checkpoint: {type(exc).__name__}: {exc}"
 
 @st.cache_data(show_spinner=False)
 def model_config() -> tuple[int, int]:
