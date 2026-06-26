@@ -483,13 +483,7 @@ def predict_checkpoints(master: pd.DataFrame | None, ticker: str | None, cutoff)
     rows: list[dict] = []
     errors: list[str] = []
 
-    # Di Streamlit Cloud, jangan load checkpoint otomatis karena startup bisa timeout.
-    # Dashboard tetap menampilkan data, metrik evaluasi, gambar prediksi, dan analisis.
-    if Path("/mount/src").exists():
-        return pd.DataFrame(), [
-            "Prediksi checkpoint dinonaktifkan di Streamlit Cloud agar aplikasi tidak timeout. "
-            "Gunakan hasil evaluasi, grafik prediksi, dan file CSV/gambar yang sudah tersedia."
-        ]
+
 
     if master is None or master.empty:
         return pd.DataFrame(), ["dataset master belum tersedia"]
@@ -596,7 +590,14 @@ def render_model_page(data: dict, ticker: str | None, dates) -> None:
     dc = date_col(master_filtered)
     cutoff = pd.to_datetime(master_filtered[dc]).max() if master_filtered is not None and not master_filtered.empty and dc else None
 
-    pred_df, errors = predict_checkpoints(data["master"], ticker, cutoff)
+    run_prediction = st.button("Jalankan Prediksi dari Checkpoint")
+
+    if run_prediction:
+        with st.spinner("Memuat checkpoint TFT S5 dan LLM-TFT S1..."):
+            pred_df, errors = predict_checkpoints(data["master"], ticker, cutoff)
+    else:
+        pred_df = pd.DataFrame()
+        errors = ["Klik tombol Jalankan Prediksi dari Checkpoint untuk memuat model."]
     chosen = selected_predictions(pred_df)
     close = latest_close(master_filtered)
 
