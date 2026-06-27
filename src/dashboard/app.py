@@ -118,14 +118,12 @@ PAGE_CONFIG = {
     },
 }
 
-PAGES = {
-    "Executive Overview": "Ringkasan performa, data, dan sinyal terbaru.",
-    "Prediction Studio": "Prediksi multi-horizon dari checkpoint final.",
-    "Model Performance": "Evaluasi global, horizon, emiten, dan attention.",
-    "Market Data Lab": "Harga, indikator teknikal, dan kualitas data.",
-    "Sentiment Intelligence": "Berita, label sentimen, dan fitur agregasi harian.",
-    "System Health": "Status file, dependency, checkpoint, dan deploy readiness.",
-}
+PAGES = [
+    "Prediction Studio",
+    "Model Performance",
+    "Market Data Lab",
+    "Sentiment Intelligence",
+]
 
 MODEL_COLORS = {
     "TFT": "#38BDF8",
@@ -172,7 +170,7 @@ section[data-testid="stSidebar"] {
   border-right: 1px solid var(--line);
 }
 .hero {
-  padding: 26px 28px;
+  padding: 24px 28px;
   border-radius: 28px;
   background:
     linear-gradient(135deg, rgba(15,23,42,0.94), rgba(30,41,59,0.58)),
@@ -185,6 +183,8 @@ section[data-testid="stSidebar"] {
 .hero-eyebrow { color: #7dd3fc; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; font-size: .74rem; }
 .hero h1 { margin: 6px 0 8px; color: #f8fafc; font-size: 2.35rem; line-height: 1.08; letter-spacing: -0.055em; }
 .hero p { margin: 0; color: #cbd5e1; max-width: 920px; font-size: .98rem; }
+.page-chip-row { display:flex; gap:10px; flex-wrap:wrap; margin:-6px 0 18px; }
+.page-chip { padding:7px 11px; border-radius:999px; background:rgba(15,23,42,.62); border:1px solid rgba(148,163,184,.16); color:#cbd5e1; font-size:.78rem; font-weight:700; }
 .card {
   padding: 18px 18px;
   border-radius: 22px;
@@ -229,13 +229,14 @@ def setup_page() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
 
 
-def hero(title: str, subtitle: str, eyebrow: str = "StockForecast Pro") -> None:
+def hero(title: str, subtitle: str | None = None, eyebrow: str = "StockForecast Pro") -> None:
+    subtitle_html = f"<p>{subtitle}</p>" if subtitle else ""
     st.markdown(
         f"""
         <div class="hero">
           <div class="hero-eyebrow">{eyebrow}</div>
           <h1>{title}</h1>
-          <p>{subtitle}</p>
+          {subtitle_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -245,6 +246,11 @@ def hero(title: str, subtitle: str, eyebrow: str = "StockForecast Pro") -> None:
 def panel(text: str, kind: str = "info") -> None:
     cls = {"ok": "status-ok", "warn": "status-warn", "bad": "status-bad"}.get(kind, "")
     st.markdown(f"<span class='pill {cls}'>{text}</span>", unsafe_allow_html=True)
+
+
+def page_chips(*items: str) -> None:
+    html = "".join(f"<span class='page-chip'>{item}</span>" for item in items)
+    st.markdown(f"<div class='page-chip-row'>{html}</div>", unsafe_allow_html=True)
 
 
 def apply_fig_theme(fig: go.Figure, height: int = 420, title: str | None = None) -> go.Figure:
@@ -1007,10 +1013,9 @@ def attention_chart(df: pd.DataFrame | None) -> None:
 def sidebar(data: dict[str, pd.DataFrame | None]):
     with st.sidebar:
         st.markdown("## 📈 StockForecast Pro")
-        st.caption("TFT S5 · LLM‑TFT S1 · Indonesia stocks")
+        st.caption("TFT S5 · LLM‑TFT S1")
         st.divider()
-        page = st.radio("Navigasi", list(PAGES.keys()), format_func=lambda x: x)
-        st.caption(PAGES[page])
+        page = st.radio("Navigasi", PAGES, format_func=lambda x: x)
         st.divider()
 
         tickers = ticker_options(data)
@@ -1026,44 +1031,9 @@ def sidebar(data: dict[str, pd.DataFrame | None]):
     return page, ticker, dates, auto_update
 
 
-def page_overview(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
-    hero("Executive Overview", "Ringkasan cepat status data, performa model, dan kondisi harga terakhir untuk membantu membaca dashboard tanpa masuk ke detail teknis.")
-    master = filter_df(data["master"], ticker, dates)
-    prices = filter_df(data["prices"], ticker, dates)
-    eval_global = long_eval(data["eval_global"], "global")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Baris master", fmt(len(master) if master is not None else 0))
-    c2.metric("Harga terakhir", rupiah(latest_close(master) or latest_close(prices)))
-    if not eval_global.empty:
-        rmse_tft = metric_value(eval_global, "TFT", "RMSE")
-        rmse_llm = metric_value(eval_global, "LLM-TFT", "RMSE")
-        dir_llm = metric_value(eval_global, "LLM-TFT", "Directional Accuracy")
-        improvement = ((rmse_tft - rmse_llm) / rmse_tft * 100) if rmse_tft and rmse_llm else None
-        c3.metric("RMSE improvement", pct(improvement) if improvement is not None else "-")
-        c4.metric("DirAcc LLM‑TFT", pct(dir_llm, 3) if dir_llm is not None else "-")
-    else:
-        c3.metric("RMSE improvement", "-")
-        c4.metric("DirAcc LLM‑TFT", "-")
-
-    left, right = st.columns([1.45, 1], gap="large")
-    with left:
-        price_chart(prices if prices is not None and not prices.empty else master, "Pergerakan harga terbaru")
-    with right:
-        st.subheader("Model winner board")
-        best = best_rows(data["eval_global"])
-        if best.empty:
-            st.info("File evaluasi global belum tersedia.")
-        else:
-            show = best[["Metric", "Model", "Value"]].copy()
-            show["Value"] = show.apply(lambda r: pct(r["Value"], 3) if r["Metric"] in {"MAPE", "Directional Accuracy"} else fmt(r["Value"], 3 if r["Metric"] == "R²" else 0), axis=1)
-            st.dataframe(show, hide_index=True, use_container_width=True)
-        st.markdown("---")
-        panel("Desain: overview → prediksi → evaluasi → data → sentimen → health", "ok")
-
-
 def page_prediction(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
-    hero("Prediction Studio", "Prediksi multi-horizon memakai checkpoint final. Halaman ini hanya inference, tidak menjalankan training ulang.")
+    hero("Prediction Studio")
+    page_chips("Checkpoint inference", "CPU mode", "TFT S5", "LLM‑TFT S1")
     master_filtered = filter_df(data["master"], ticker, dates)
     dc = date_col(master_filtered)
     cutoff = pd.to_datetime(master_filtered[dc]).max() if master_filtered is not None and not master_filtered.empty and dc else None
@@ -1105,8 +1075,9 @@ def page_prediction(data: dict[str, pd.DataFrame | None], ticker: str | None, da
 
 
 def page_performance(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
-    hero("Model Performance", "Evaluasi disusun agar pembaca cepat melihat model terbaik, konsistensi per horizon, performa per emiten, dan attention pattern.")
-    tabs = st.tabs(["Global", "Horizon", "Emiten", "Attention", "Raw tables"])
+    hero("Model Performance")
+    page_chips("Global", "Horizon", "Emiten", "Attention")
+    tabs = st.tabs(["Global", "Horizon", "Emiten", "Attention"])
     with tabs[0]:
         eval_global = long_eval(data["eval_global"], "global")
         if eval_global.empty:
@@ -1128,21 +1099,11 @@ def page_performance(data: dict[str, pd.DataFrame | None], ticker: str | None, d
         ticker_heatmap(data["eval_ticker"])
     with tabs[3]:
         attention_chart(data["attention"])
-    with tabs[4]:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.caption("Global")
-            st.dataframe(data["eval_global"] if data["eval_global"] is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-        with c2:
-            st.caption("Horizon")
-            st.dataframe(data["eval_horizon"] if data["eval_horizon"] is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
-        with c3:
-            st.caption("Emiten")
-            st.dataframe(data["eval_ticker"] if data["eval_ticker"] is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
 
 
 def page_market_data(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
-    hero("Market Data Lab", "Eksplorasi harga dan indikator teknikal. Candlestick digunakan ketika data OHLC lengkap; line chart dipakai sebagai fallback yang lebih ringan.")
+    hero("Market Data Lab")
+    page_chips("Price action", "Technical indicator", "Correlation")
     prices = filter_df(data["prices"], ticker, dates)
     if prices is None or prices.empty:
         st.info("Data harga belum tersedia.")
@@ -1182,16 +1143,16 @@ def page_market_data(data: dict[str, pd.DataFrame | None], ticker: str | None, d
 
 
 def page_sentiment(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
-    hero("Sentiment Intelligence", "Menganalisis cakupan berita, distribusi label sentimen, dan fitur sentimen harian yang dipakai oleh LLM‑TFT.")
+    hero("Sentiment Intelligence")
+    page_chips("News timeline", "Sentiment label", "Daily sentiment feature")
     news = filter_df(data["news"], ticker, dates)
     articles = filter_df(data["articles"], ticker, dates)
     daily = filter_df(data["daily"], ticker, dates)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Berita bersih", fmt(len(news) if news is not None else 0))
     c2.metric("Artikel berlabel", fmt(len(articles) if articles is not None else 0))
     c3.metric("Hari sentimen", fmt(len(daily) if daily is not None else 0))
-    c4.metric("Sumber", fmt(news["source"].nunique() if news is not None and "source" in news.columns else 0))
 
     left, right = st.columns([1.1, 1], gap="large")
     with left:
@@ -1214,72 +1175,24 @@ def page_sentiment(data: dict[str, pd.DataFrame | None], ticker: str | None, dat
         else:
             st.info("Label sentimen artikel belum tersedia.")
 
-    left2, right2 = st.columns([1.15, 1], gap="large")
-    with left2:
-        if daily is not None and not daily.empty and date_col(daily):
-            available = [c for c in SENT_FEATURES if c in daily.columns]
-            if available:
-                selected = st.selectbox("Fitur sentimen harian", available)
-                dc = date_col(daily)
-                fig = px.line(daily.sort_values(dc), x=dc, y=selected, color_discrete_sequence=["#F97316"])
-                fig.update_traces(line=dict(width=3))
-                st.plotly_chart(apply_fig_theme(fig, 400, f"Tren {selected}"), use_container_width=True)
-            else:
-                st.info("Fitur sentimen harian belum tersedia.")
+    if daily is not None and not daily.empty and date_col(daily):
+        available = [c for c in SENT_FEATURES if c in daily.columns]
+        if available:
+            selected = st.selectbox("Fitur sentimen harian", available)
+            dc = date_col(daily)
+            fig = px.line(daily.sort_values(dc), x=dc, y=selected, color_discrete_sequence=["#F97316"])
+            fig.update_traces(line=dict(width=3))
+            st.plotly_chart(apply_fig_theme(fig, 420, f"Tren {selected}"), use_container_width=True)
         else:
-            st.info("Data sentimen harian belum tersedia.")
-    with right2:
-        if news is not None and not news.empty and "source" in news.columns:
-            sources = news["source"].fillna("Tidak diketahui").value_counts().head(12).sort_values().reset_index()
-            sources.columns = ["Sumber", "Jumlah"]
-            fig = px.bar(sources, x="Jumlah", y="Sumber", orientation="h", color="Jumlah", color_continuous_scale="Bluered")
-            st.plotly_chart(apply_fig_theme(fig, 400, "Top sumber berita"), use_container_width=True)
-        else:
-            st.info("Kolom sumber berita belum tersedia.")
+            st.info("Fitur sentimen harian belum tersedia.")
+    else:
+        st.info("Data sentimen harian belum tersedia.")
 
     with st.expander("Tabel artikel/berita"):
         table = articles if articles is not None and not articles.empty else news
         st.dataframe(table.tail(500) if table is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
 
 
-def file_status_rows() -> pd.DataFrame:
-    rows = []
-    for name, paths in PATHS.items():
-        found = first_existing(paths)
-        rows.append({
-            "Komponen": name,
-            "Status": "OK" if found else "Belum ada",
-            "Path aktif": str(found.relative_to(ROOT)) if found and found.is_relative_to(ROOT) else str(found) if found else "-",
-            "Ukuran": fmt(found.stat().st_size) if found else "-",
-        })
-    for model, scenario, path in CHECKPOINTS:
-        rows.append({
-            "Komponen": f"Checkpoint {model} {scenario}",
-            "Status": "OK" if path.exists() and path.stat().st_size > 1024 else "Periksa",
-            "Path aktif": str(path.relative_to(ROOT)) if path.exists() and path.is_relative_to(ROOT) else str(path),
-            "Ukuran": fmt(path.stat().st_size) if path.exists() else "-",
-        })
-    return pd.DataFrame(rows)
-
-
-def page_health(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
-    hero("System Health", "Halaman ini membantu memastikan deploy bersih: path relatif, dependency, checkpoint, dan file CSV utama terlihat jelas.")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Root repo", ROOT.name)
-    c2.metric("Torch", "OK" if torch is not None else "Error")
-    c3.metric("PyTorch Forecasting", "OK" if TemporalFusionTransformer is not None else "Error")
-    c4.metric("CUDA visible", os.getenv("CUDA_VISIBLE_DEVICES", ""))
-
-    if IMPORT_MODEL_ERROR:
-        st.error(f"Import model error: {IMPORT_MODEL_ERROR}")
-    else:
-        panel("Dependency model berhasil diimpor dalam mode CPU", "ok")
-
-    st.subheader("File readiness")
-    st.dataframe(file_status_rows(), hide_index=True, use_container_width=True)
-
-    with st.expander("Debug path"):
-        st.code(f"ROOT = {ROOT}\nCONFIG_PATH = {CONFIG_PATH}\nCHECKPOINTS = {[str(p) for _, _, p in CHECKPOINTS]}")
 
 
 # ============================================================
@@ -1295,18 +1208,14 @@ def main() -> None:
             st.write("\n".join(logs))
         data = load_all_data()
 
-    if page == "Executive Overview":
-        page_overview(data, ticker, dates)
-    elif page == "Prediction Studio":
+    if page == "Prediction Studio":
         page_prediction(data, ticker, dates)
     elif page == "Model Performance":
         page_performance(data, ticker, dates)
     elif page == "Market Data Lab":
         page_market_data(data, ticker, dates)
-    elif page == "Sentiment Intelligence":
-        page_sentiment(data, ticker, dates)
     else:
-        page_health(data, ticker, dates)
+        page_sentiment(data, ticker, dates)
 
 
 if __name__ == "__main__":
