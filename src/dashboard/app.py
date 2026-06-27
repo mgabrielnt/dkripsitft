@@ -2,13 +2,9 @@ from __future__ import annotations
 
 import os
 import re
-import sys
-import subprocess
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 # Streamlit Cloud tidak menyediakan GPU. Baris ini harus dieksekusi sebelum torch dipakai.
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -56,8 +52,6 @@ PROCESSED = DATA / "processed"
 REPORTSS = ROOT / "reportss"
 REPORTS = ROOT / "reports"
 CONFIG_PATH = ROOT / "configs" / "model_tft.yaml"
-UPDATE_MARKER = Path(os.getenv("STOCKFORECAST_UPDATE_MARKER", str(ROOT / ".dashboard_last_data_update")))
-JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
 
 CHECKPOINTS: list[tuple[str, str, Path]] = [
     ("TFT", "S5", ROOT / "modelssss/baseline/S5/best-checkpoint.ckpt"),
@@ -90,19 +84,6 @@ CALENDAR_CATS = ["day_of_week", "month", "is_month_end"]
 FINAL_LABELS = ["l_final", "final_label", "label_final", "sentiment_final", "sentiment"]
 DROP_NAMES = {"n", "count", "jumlah", "index", "unnamed", "unnamed0"}
 
-AUTO_UPDATE_DATA_ON_START = os.getenv("STOCKFORECAST_AUTO_UPDATE", "false").strip().lower() in {"1", "true", "yes"}
-AUTO_COMMAND_TIMEOUT_SECONDS = int(os.getenv("STOCKFORECAST_UPDATE_TIMEOUT", "180"))
-AUTO_DATA_COMMANDS = [
-    ("Harga Yahoo Finance", [sys.executable, "-m", "src.data.download_prices_yahoo"]),
-    ("Indikator teknikal", [sys.executable, "-m", "src.data.compute_technical_indicators"]),
-    ("Berita RSS dan Google News", [sys.executable, "-m", "src.data.fetch_news_rss_google"]),
-    ("Berita Yahoo Finance", [sys.executable, "-m", "src.data.fetch_news_yahoo"]),
-    ("Gabung berita", [sys.executable, "-m", "src.data.merge_news_sources"]),
-    ("Pembersihan berita", [sys.executable, "-m", "src.data.preprocess_news_text"]),
-    ("Label sentimen artikel", [sys.executable, "-m", "src.data.gpt_sentiment_labeling"]),
-    ("Agregasi sentimen", [sys.executable, "-m", "src.data.aggregate_daily_sentiment"]),
-    ("Dataset master", [sys.executable, "-m", "src.data.build_tft_master_dataset"]),
-]
 
 
 # ============================================================
@@ -296,9 +277,6 @@ def pct(value: Any, decimals: int = 2) -> str:
     return f"{fmt(value, decimals)}%" if value is not None and not pd.isna(value) else "-"
 
 
-def today_jakarta() -> str:
-    return datetime.now(JAKARTA_TZ).strftime("%Y-%m-%d")
-
 
 def date_col(df: pd.DataFrame | None) -> str | None:
     if df is None:
@@ -386,46 +364,7 @@ def global_date_range(data: dict[str, pd.DataFrame | None]) -> tuple[pd.Timestam
 
 
 # ============================================================
-# 4. DATA UPDATE
-# ============================================================
-def marker_is_today() -> bool:
-    try:
-        return UPDATE_MARKER.exists() and UPDATE_MARKER.read_text(encoding="utf-8").strip() == today_jakarta()
-    except Exception:
-        return False
-
-
-def run_data_update_once_per_day(enabled: bool) -> list[str]:
-    logs: list[str] = []
-    if not enabled or marker_is_today():
-        return logs
-    with st.status("Memperbarui data harian. Model tidak dilatih ulang.", expanded=False) as status:
-        for label, cmd in AUTO_DATA_COMMANDS:
-            joined = " ".join(cmd)
-            if "gpt_sentiment_labeling" in joined and not os.getenv("OPENAI_API_KEY"):
-                logs.append(f"SKIP {label}: OPENAI_API_KEY belum tersedia")
-                continue
-            status.update(label=f"Menjalankan: {label}")
-            try:
-                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=AUTO_COMMAND_TIMEOUT_SECONDS)
-                if result.returncode == 0:
-                    logs.append(f"OK {label}")
-                else:
-                    tail = (result.stderr or result.stdout or "").strip().splitlines()[-4:]
-                    logs.append(f"GAGAL {label}: {' | '.join(tail)}")
-            except Exception as exc:
-                logs.append(f"GAGAL {label}: {type(exc).__name__}: {exc}")
-        try:
-            UPDATE_MARKER.parent.mkdir(parents=True, exist_ok=True)
-            UPDATE_MARKER.write_text(today_jakarta(), encoding="utf-8")
-        except Exception as exc:
-            logs.append(f"GAGAL menulis marker update: {type(exc).__name__}: {exc}")
-        status.update(label="Update data selesai", state="complete")
-    return logs
-
-
-# ============================================================
-# 5. CHECKPOINT AND PREDICTION ENGINE
+# 4. CHECKPOINT AND PREDICTION ENGINE
 # ============================================================
 def clean_cpu_object(obj: Any) -> Any:
     if torch is not None:
@@ -1008,7 +947,7 @@ def attention_chart(df: pd.DataFrame | None) -> None:
 
 
 # ============================================================
-# 8. PAGES
+# 7. PAGES
 # ============================================================
 def sidebar(data: dict[str, pd.DataFrame | None]):
     with st.sidebar:
@@ -1026,9 +965,7 @@ def sidebar(data: dict[str, pd.DataFrame | None]):
             start, end = drange
             dates = st.date_input("Rentang tanggal", value=(start.date(), end.date()), min_value=start.date(), max_value=end.date())
         st.divider()
-        auto_update = st.toggle("Auto update data harian", value=AUTO_UPDATE_DATA_ON_START)
-        st.caption(f"Tanggal run: {today_jakarta()}")
-    return page, ticker, dates, auto_update
+    return page, ticker, dates
 
 
 def page_prediction(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
@@ -1196,17 +1133,12 @@ def page_sentiment(data: dict[str, pd.DataFrame | None], ticker: str | None, dat
 
 
 # ============================================================
-# 9. MAIN
+# 8. MAIN
 # ============================================================
 def main() -> None:
     setup_page()
     data = load_all_data()
-    page, ticker, dates, auto_update = sidebar(data)
-    logs = run_data_update_once_per_day(auto_update)
-    if logs:
-        with st.sidebar.expander("Log update"):
-            st.write("\n".join(logs))
-        data = load_all_data()
+    page, ticker, dates = sidebar(data)
 
     if page == "Prediction Studio":
         page_prediction(data, ticker, dates)
