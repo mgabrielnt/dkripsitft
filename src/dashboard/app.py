@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import os
-# Paksa mode CPU sejak awal agar aman di Streamlit Cloud yang tidak memiliki GPU NVIDIA.
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import re
 import sys
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
+
+# Streamlit Cloud tidak menyediakan GPU. Baris ini harus dieksekusi sebelum torch dipakai.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import pandas as pd
@@ -17,14 +20,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-IMPORT_MODEL_ERROR = None
-
+IMPORT_MODEL_ERROR: str | None = None
 try:
     import torch
     import yaml
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
     from pytorch_forecasting.data import GroupNormalizer
-except Exception as exc:
+except Exception as exc:  # pragma: no cover - ditampilkan di dashboard health page
     IMPORT_MODEL_ERROR = f"{type(exc).__name__}: {exc}"
     torch = None
     yaml = None
@@ -32,29 +34,18 @@ except Exception as exc:
     TimeSeriesDataSet = None
     GroupNormalizer = None
 
+
 # ============================================================
-# 1. KONFIGURASI TUNGGAL
+# 1. PROJECT CONFIGURATION
 # ============================================================
 def resolve_project_root() -> Path:
-    """Cari root repository secara aman untuk local dan Streamlit Cloud.
-
-    App ini normalnya berada di src/dashboard/app.py. Namun fungsi ini tetap
-    aman jika file dijalankan dari lokasi lain, misalnya streamlit_app.py wrapper.
-    """
     current = Path(__file__).resolve()
-    candidates = [current.parent, *current.parents]
-
-    # Prioritas utama: root repo yang berisi configs dan src.
-    for base in candidates:
-        if (base / "configs").exists() and (base / "src").exists():
+    for base in [current.parent, *current.parents]:
+        if (base / "configs").exists() and ((base / "src").exists() or (base / "data").exists()):
             return base
-
-    # Fallback: root repo yang minimal punya salah satu folder proyek.
-    for base in candidates:
-        if any((base / marker).exists() for marker in ("data", "modelssss", "reportss", "configs")):
+    for base in [current.parent, *current.parents]:
+        if any((base / name).exists() for name in ["data", "modelssss", "reportss", "reports", "configs"]):
             return base
-
-    # Fallback terakhir untuk struktur src/dashboard/app.py.
     return current.parents[2] if len(current.parents) >= 3 else current.parent
 
 
@@ -68,22 +59,23 @@ CONFIG_PATH = ROOT / "configs" / "model_tft.yaml"
 UPDATE_MARKER = Path(os.getenv("STOCKFORECAST_UPDATE_MARKER", str(ROOT / ".dashboard_last_data_update")))
 JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
 
-# Model hanya memakai checkpoint final ini. Tidak ada training/evaluasi ulang dari dashboard.
-CHECKPOINTS = [
+CHECKPOINTS: list[tuple[str, str, Path]] = [
     ("TFT", "S5", ROOT / "modelssss/baseline/S5/best-checkpoint.ckpt"),
     ("LLM-TFT", "S1", ROOT / "modelssss/hybrid/S1/best-checkpoint.ckpt"),
 ]
 
-PRICE_PATHS = [INTERIM / "prices_with_indicators.csv", PROCESSED / "prices_with_indicators.csv"]
-NEWS_PATHS = [INTERIM / "news_clean.csv", PROCESSED / "news_clean.csv"]
-ARTICLE_PATHS = [PROCESSED / "news_with_sentiment_per_article.csv", INTERIM / "article_sentiment.csv"]
-DAILY_SENTIMENT_PATHS = [PROCESSED / "daily_sentiment.csv", INTERIM / "daily_sentiment.csv"]
-MASTER_PATHS = [PROCESSED / "tft_master.csv", INTERIM / "tft_master.csv"]
-EVAL_GLOBAL_PATHS = [REPORTSS / "eval_metrics_global.csv", REPORTS / "eval_metrics_global.csv"]
-EVAL_TICKER_PATHS = [REPORTSS / "eval_metrics_by_ticker_global.csv", REPORTS / "eval_metrics_by_ticker_global.csv"]
-EVAL_HORIZON_PATHS = [REPORTSS / "eval_metrics_by_horizon.csv", REPORTS / "eval_metrics_by_horizon.csv"]
-ATTENTION_PATHS = [REPORTSS / "attention_comparison.csv", REPORTSS / "attention_weights.csv"]
-PREDICTION_PATHS = [REPORTSS / "backtest_predictions.csv", REPORTSS / "predictions.csv", PROCESSED / "predictions.csv"]
+PATHS: dict[str, list[Path]] = {
+    "prices": [INTERIM / "prices_with_indicators.csv", PROCESSED / "prices_with_indicators.csv"],
+    "news": [INTERIM / "news_clean.csv", PROCESSED / "news_clean.csv"],
+    "articles": [PROCESSED / "news_with_sentiment_per_article.csv", INTERIM / "article_sentiment.csv"],
+    "daily": [PROCESSED / "daily_sentiment.csv", INTERIM / "daily_sentiment.csv"],
+    "master": [PROCESSED / "tft_master.csv", INTERIM / "tft_master.csv"],
+    "eval_global": [REPORTSS / "eval_metrics_global.csv", REPORTS / "eval_metrics_global.csv"],
+    "eval_ticker": [REPORTSS / "eval_metrics_by_ticker_global.csv", REPORTS / "eval_metrics_by_ticker_global.csv"],
+    "eval_horizon": [REPORTSS / "eval_metrics_by_horizon.csv", REPORTS / "eval_metrics_by_horizon.csv"],
+    "attention": [REPORTSS / "attention_comparison.csv", REPORTSS / "attention_weights.csv"],
+    "predictions": [REPORTSS / "backtest_predictions.csv", REPORTSS / "predictions.csv", PROCESSED / "predictions.csv"],
+}
 
 TECH_FEATURES = [
     "close", "volume", "log_return_1d", "log_return_2d", "vol_20", "rsi_14",
@@ -93,111 +85,193 @@ SENT_FEATURES = [
     "news_count_3d", "sentiment_mean_3d", "sentiment_ema_7d",
     "sentiment_trend_7d", "sentiment_delta_1d", "sentiment_dir_signal",
 ]
-# Kompatibilitas untuk checkpoint lama yang dilatih dengan sentiment_final_mean.
 COMPAT_SENT_FEATURES = ["sentiment_final_mean"]
-CAT_FEATURES = ["ticker", "day_of_week", "month", "is_month_end"]
+CALENDAR_CATS = ["day_of_week", "month", "is_month_end"]
 FINAL_LABELS = ["l_final", "final_label", "label_final", "sentiment_final", "sentiment"]
+DROP_NAMES = {"n", "count", "jumlah", "index", "unnamed", "unnamed0"}
 
-COLORS = ["#38BDF8", "#F97316", "#22C55E", "#A855F7", "#F43F5E", "#14B8A6"]
+AUTO_UPDATE_DATA_ON_START = os.getenv("STOCKFORECAST_AUTO_UPDATE", "false").strip().lower() in {"1", "true", "yes"}
+AUTO_COMMAND_TIMEOUT_SECONDS = int(os.getenv("STOCKFORECAST_UPDATE_TIMEOUT", "180"))
+AUTO_DATA_COMMANDS = [
+    ("Harga Yahoo Finance", [sys.executable, "-m", "src.data.download_prices_yahoo"]),
+    ("Indikator teknikal", [sys.executable, "-m", "src.data.compute_technical_indicators"]),
+    ("Berita RSS dan Google News", [sys.executable, "-m", "src.data.fetch_news_rss_google"]),
+    ("Berita Yahoo Finance", [sys.executable, "-m", "src.data.fetch_news_yahoo"]),
+    ("Gabung berita", [sys.executable, "-m", "src.data.merge_news_sources"]),
+    ("Pembersihan berita", [sys.executable, "-m", "src.data.preprocess_news_text"]),
+    ("Label sentimen artikel", [sys.executable, "-m", "src.data.gpt_sentiment_labeling"]),
+    ("Agregasi sentimen", [sys.executable, "-m", "src.data.aggregate_daily_sentiment"]),
+    ("Dataset master", [sys.executable, "-m", "src.data.build_tft_master_dataset"]),
+]
+
+
+# ============================================================
+# 2. DESIGN SYSTEM
+# ============================================================
+PAGE_CONFIG = {
+    "page_title": "StockForecast Pro",
+    "page_icon": "📈",
+    "layout": "wide",
+    "initial_sidebar_state": "expanded",
+    "menu_items": {
+        "About": "StockForecast Pro — dashboard TFT dan LLM-TFT untuk prediksi harga saham Indonesia.",
+    },
+}
+
+PAGES = {
+    "Executive Overview": "Ringkasan performa, data, dan sinyal terbaru.",
+    "Prediction Studio": "Prediksi multi-horizon dari checkpoint final.",
+    "Model Performance": "Evaluasi global, horizon, emiten, dan attention.",
+    "Market Data Lab": "Harga, indikator teknikal, dan kualitas data.",
+    "Sentiment Intelligence": "Berita, label sentimen, dan fitur agregasi harian.",
+    "System Health": "Status file, dependency, checkpoint, dan deploy readiness.",
+}
+
 MODEL_COLORS = {
-    "Encoder 15 Hari": "#E5E7EB",
     "TFT": "#38BDF8",
     "LLM-TFT": "#F97316",
     "TFT S5": "#38BDF8",
     "LLM-TFT S1": "#F97316",
     "Aktual": "#E5E7EB",
+    "Encoder": "#94A3B8",
+    "Positif": "#22C55E",
+    "Netral": "#FACC15",
+    "Negatif": "#F43F5E",
 }
 
-# Auto update data harian. Tidak menjalankan training model.
-AUTO_UPDATE_DATA_ON_START = os.getenv("STOCKFORECAST_AUTO_UPDATE", "false").strip().lower() in {"1", "true", "yes", "y"}
-AUTO_COMMAND_TIMEOUT_SECONDS = int(os.getenv("STOCKFORECAST_UPDATE_TIMEOUT", "180"))
-AUTO_DATA_COMMANDS = [
-    ("Ambil harga Yahoo Finance", [sys.executable, "-m", "src.data.download_prices_yahoo"]),
-    ("Hitung indikator teknikal", [sys.executable, "-m", "src.data.compute_technical_indicators"]),
-    ("Ambil berita RSS dan Google News", [sys.executable, "-m", "src.data.fetch_news_rss_google"]),
-    ("Ambil berita Yahoo Finance", [sys.executable, "-m", "src.data.fetch_news_yahoo"]),
-    ("Gabung sumber berita", [sys.executable, "-m", "src.data.merge_news_sources"]),
-    ("Bersihkan teks berita", [sys.executable, "-m", "src.data.preprocess_news_text"]),
-    # Jika OPENAI_API_KEY tidak ada, langkah ini akan dilewati agar dashboard tetap bisa jalan.
-    ("Label sentimen artikel", [sys.executable, "-m", "src.data.gpt_sentiment_labeling"]),
-    ("Agregasi sentimen harian", [sys.executable, "-m", "src.data.aggregate_daily_sentiment"]),
-    ("Bangun dataset master", [sys.executable, "-m", "src.data.build_tft_master_dataset"]),
-]
+QUALITATIVE = ["#38BDF8", "#F97316", "#22C55E", "#A855F7", "#F43F5E", "#14B8A6", "#FACC15"]
 
-PAGES = ["Model dan Prediksi", "Evaluasi Model", "Data Harga Saham", "Berita Keuangan dan Sentimen"]
-DROP_NAMES = {"n", "count", "jumlah", "split", "index", "unnamed0", "unnamed"}
-
-
-# ============================================================
-# 2. STYLE DAN UTILITAS UMUM
-# ============================================================
 CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root {
+  --bg0: #020617;
+  --bg1: #0f172a;
+  --card: rgba(15, 23, 42, 0.76);
+  --card2: rgba(30, 41, 59, 0.66);
+  --line: rgba(148, 163, 184, 0.18);
+  --text: #e5e7eb;
+  --muted: #94a3b8;
+  --blue: #38bdf8;
+  --orange: #fb923c;
+  --green: #22c55e;
+  --red: #f43f5e;
+}
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .stApp {
-    background:
-    radial-gradient(circle at top left, rgba(56,189,248,0.17), transparent 34%),
-    radial-gradient(circle at top right, rgba(249,115,22,0.13), transparent 30%),
-    linear-gradient(135deg, #050B16 0%, #0F172A 48%, #111827 100%);
-    color: #e5e7eb;
+  background:
+    radial-gradient(circle at 6% 4%, rgba(56,189,248,0.20), transparent 32%),
+    radial-gradient(circle at 86% 0%, rgba(249,115,22,0.14), transparent 28%),
+    radial-gradient(circle at 72% 88%, rgba(168,85,247,0.10), transparent 32%),
+    linear-gradient(135deg, #020617 0%, #0f172a 45%, #111827 100%);
+  color: var(--text);
 }
+.block-container { padding-top: 1.2rem; padding-bottom: 2.4rem; max-width: 1480px; }
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #050B16 0%, #0B1220 100%);
-    border-right: 1px solid rgba(148,163,184,0.18);
+  background: linear-gradient(180deg, rgba(2,6,23,0.98), rgba(15,23,42,0.98));
+  border-right: 1px solid var(--line);
 }
-.main-title {
-    padding: 24px 28px; border-radius: 26px;
-    background:
-    radial-gradient(circle at 10% 0%, rgba(56,189,248,0.34), transparent 34%),
-    radial-gradient(circle at 95% 20%, rgba(249,115,22,0.22), transparent 30%),
-    linear-gradient(135deg, rgba(15,23,42,0.98), rgba(30,41,59,0.72));
-    border: 1px solid rgba(148,163,184,0.25);
-    box-shadow: 0 22px 60px rgba(0,0,0,0.30);
-    margin-bottom: 22px;
+.hero {
+  padding: 26px 28px;
+  border-radius: 28px;
+  background:
+    linear-gradient(135deg, rgba(15,23,42,0.94), rgba(30,41,59,0.58)),
+    radial-gradient(circle at 8% 0%, rgba(56,189,248,0.28), transparent 38%),
+    radial-gradient(circle at 95% 12%, rgba(249,115,22,0.22), transparent 35%);
+  border: 1px solid rgba(148,163,184,0.22);
+  box-shadow: 0 26px 70px rgba(0,0,0,0.35);
+  margin-bottom: 20px;
 }
-.main-title h1 { margin: 0; font-size: 2.05rem; letter-spacing: -0.04em; color: #f8fafc; }
-.main-title p { margin: 8px 0 0 0; color: #cbd5e1; }
+.hero-eyebrow { color: #7dd3fc; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; font-size: .74rem; }
+.hero h1 { margin: 6px 0 8px; color: #f8fafc; font-size: 2.35rem; line-height: 1.08; letter-spacing: -0.055em; }
+.hero p { margin: 0; color: #cbd5e1; max-width: 920px; font-size: .98rem; }
+.card {
+  padding: 18px 18px;
+  border-radius: 22px;
+  background: linear-gradient(145deg, rgba(15,23,42,0.82), rgba(30,41,59,0.56));
+  border: 1px solid rgba(148,163,184,0.16);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.22);
+}
+.small-caption { color: var(--muted); font-size: .84rem; }
+.pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 999px;
+  border: 1px solid rgba(148,163,184,0.20);
+  background: rgba(15,23,42,0.72);
+  color: #cbd5e1; font-size: .80rem; font-weight: 600;
+}
+.status-ok { color: #86efac; }
+.status-warn { color: #fde68a; }
+.status-bad { color: #fda4af; }
 div[data-testid="stMetric"] {
-    background: linear-gradient(145deg, rgba(15,23,42,0.88), rgba(30,41,59,0.70));
-    border: 1px solid rgba(148,163,184,0.18);
-    padding: 15px 16px; border-radius: 18px; box-shadow: 0 10px 24px rgba(0,0,0,0.22);
+  background: linear-gradient(145deg, rgba(15,23,42,0.88), rgba(30,41,59,0.70));
+  border: 1px solid rgba(148,163,184,0.16);
+  padding: 15px 16px;
+  border-radius: 18px;
+  box-shadow: 0 10px 26px rgba(0,0,0,0.20);
 }
-.block-container { padding-top: 1.4rem; padding-bottom: 2.5rem; }
+div[data-testid="stMetric"] label { color: #cbd5e1 !important; }
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+  border-radius: 999px;
+  padding: 8px 15px;
+  background: rgba(15,23,42,0.64);
+  border: 1px solid rgba(148,163,184,0.14);
+}
+.stDataFrame { border-radius: 16px; overflow: hidden; border: 1px solid rgba(148,163,184,0.14); }
+hr { border-color: rgba(148,163,184,0.14); }
 </style>
 """
 
 
-def apply_style() -> None:
+def setup_page() -> None:
+    st.set_page_config(**PAGE_CONFIG)
     st.markdown(CSS, unsafe_allow_html=True)
 
 
-def header(title: str, subtitle: str | None = None) -> None:
-    sub = f"<p>{subtitle}</p>" if subtitle else ""
-    st.markdown(f"<div class='main-title'><h1>{title}</h1>{sub}</div>", unsafe_allow_html=True)
+def hero(title: str, subtitle: str, eyebrow: str = "StockForecast Pro") -> None:
+    st.markdown(
+        f"""
+        <div class="hero">
+          <div class="hero-eyebrow">{eyebrow}</div>
+          <h1>{title}</h1>
+          <p>{subtitle}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def layout(fig, height: int = 420):
+def panel(text: str, kind: str = "info") -> None:
+    cls = {"ok": "status-ok", "warn": "status-warn", "bad": "status-bad"}.get(kind, "")
+    st.markdown(f"<span class='pill {cls}'>{text}</span>", unsafe_allow_html=True)
+
+
+def apply_fig_theme(fig: go.Figure, height: int = 420, title: str | None = None) -> go.Figure:
     fig.update_layout(
         template="plotly_dark",
         height=height,
+        title=title,
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,23,42,0.38)",
-        margin=dict(l=18, r=18, t=52, b=28),
+        plot_bgcolor="rgba(15,23,42,0.35)",
+        margin=dict(l=18, r=18, t=52 if title else 28, b=32),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        font=dict(color="#e5e7eb"),
-        colorway=COLORS,
+        font=dict(color="#e5e7eb", family="Inter"),
+        colorway=QUALITATIVE,
     )
-    fig.update_xaxes(gridcolor="rgba(148,163,184,0.14)")
-    fig.update_yaxes(gridcolor="rgba(148,163,184,0.14)")
+    fig.update_xaxes(gridcolor="rgba(148,163,184,0.13)", zerolinecolor="rgba(148,163,184,0.22)")
+    fig.update_yaxes(gridcolor="rgba(148,163,184,0.13)", zerolinecolor="rgba(148,163,184,0.22)")
     return fig
 
 
-def norm(text) -> str:
+# ============================================================
+# 3. UTILITIES
+# ============================================================
+def norm(text: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(text).lower().replace("²", "2"))
 
 
-def fmt(value, decimals: int = 0) -> str:
+def fmt(value: Any, decimals: int = 0) -> str:
     if value is None or pd.isna(value):
         return "-"
     try:
@@ -208,8 +282,16 @@ def fmt(value, decimals: int = 0) -> str:
         return str(value)
 
 
-def rupiah(value) -> str:
+def rupiah(value: Any) -> str:
     return f"Rp {fmt(value)}"
+
+
+def pct(value: Any, decimals: int = 2) -> str:
+    return f"{fmt(value, decimals)}%" if value is not None and not pd.isna(value) else "-"
+
+
+def today_jakarta() -> str:
+    return datetime.now(JAKARTA_TZ).strftime("%Y-%m-%d")
 
 
 def date_col(df: pd.DataFrame | None) -> str | None:
@@ -229,93 +311,33 @@ def find_col(df: pd.DataFrame | None, candidates: list[str]) -> str | None:
     return next((col for col in df.columns if any(norm(c) in norm(col) or norm(col) in norm(c) for c in candidates)), None)
 
 
-def find_contains_col(df: pd.DataFrame | None, include: list[str], exclude: list[str] | None = None) -> str | None:
-    if df is None:
-        return None
-    exclude = exclude or []
-    for col in df.columns:
-        low = norm(col)
-        if all(norm(i) in low for i in include) and not any(norm(e) in low for e in exclude):
-            return col
-    return None
+def first_existing(paths: list[Path]) -> Path | None:
+    return next((path for path in paths if path.exists() and path.stat().st_size > 0), None)
 
 
-def normalize_date_range(dates) -> tuple[pd.Timestamp, pd.Timestamp] | None:
-    """Normalisasi nilai st.date_input agar tidak error saat user memilih satu tanggal."""
-    if dates is None:
-        return None
+def normalize_date_range(dates: Any) -> tuple[pd.Timestamp, pd.Timestamp] | None:
     if isinstance(dates, (list, tuple)) and len(dates) == 2 and dates[0] and dates[1]:
         start, end = pd.to_datetime(dates[0]), pd.to_datetime(dates[1])
-        return (min(start, end), max(start, end))
+        return min(start, end), max(start, end)
     return None
 
 
-def filter_df(df: pd.DataFrame | None, ticker: str | None, dates) -> pd.DataFrame | None:
+def filter_df(df: pd.DataFrame | None, ticker: str | None = None, dates: Any = None) -> pd.DataFrame | None:
     if df is None:
         return None
     out = df.copy()
     if ticker and "ticker" in out.columns:
         out = out[out["ticker"].astype(str).eq(str(ticker))]
     dc = date_col(out)
-    date_range = normalize_date_range(dates)
-    if dc and date_range is not None:
-        start, end = date_range
+    drange = normalize_date_range(dates)
+    if dc and drange:
+        start, end = drange
         out = out[(out[dc] >= start) & (out[dc] <= end)]
     return out
 
 
-# ============================================================
-# 3. AUTO UPDATE DATA HARIAN TANPA TRAINING MODEL
-# ============================================================
-def today_jakarta() -> str:
-    return datetime.now(JAKARTA_TZ).strftime("%Y-%m-%d")
-
-
-def marker_is_today() -> bool:
-    return UPDATE_MARKER.exists() and UPDATE_MARKER.read_text(encoding="utf-8").strip() == today_jakarta()
-
-
-def run_data_update_once_per_day(enabled: bool = True) -> list[str]:
-    logs: list[str] = []
-    if not enabled or marker_is_today():
-        return logs
-
-    with st.status("Memperbarui data harian. Model tidak dilatih ulang.", expanded=False) as status:
-        for label, cmd in AUTO_DATA_COMMANDS:
-            if "gpt_sentiment_labeling" in " ".join(cmd) and not os.getenv("OPENAI_API_KEY"):
-                logs.append(f"SKIP {label}: OPENAI_API_KEY belum tersedia.")
-                continue
-            status.update(label=f"Menjalankan: {label}")
-            try:
-                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=AUTO_COMMAND_TIMEOUT_SECONDS)
-                if result.returncode == 0:
-                    logs.append(f"OK {label}")
-                else:
-                    err = (result.stderr or result.stdout or "").strip().splitlines()[-6:]
-                    logs.append(f"GAGAL {label}: {' | '.join(err)}")
-            except Exception as exc:
-                logs.append(f"GAGAL {label}: {type(exc).__name__}: {exc}")
-        try:
-            UPDATE_MARKER.parent.mkdir(parents=True, exist_ok=True)
-            UPDATE_MARKER.write_text(today_jakarta(), encoding="utf-8")
-        except Exception as exc:
-            logs.append(f"GAGAL tulis marker update: {type(exc).__name__}: {exc}")
-        status.update(label="Update data harian selesai. Dashboard memakai checkpoint tetap.", state="complete")
-    return logs
-
-
-# ============================================================
-# 4. LOAD DATA TANPA CACHE STALE
-# ============================================================
-def first_existing(paths: list[Path]) -> Path | None:
-    for path in paths:
-        if path.exists():
-            return path
-    return None
-
-
 def read_csv_current(path: Path | None) -> pd.DataFrame | None:
-    if path is None or not path.exists():
+    if path is None:
         return None
     try:
         df = pd.read_csv(path)
@@ -331,29 +353,254 @@ def read_csv_current(path: Path | None) -> pd.DataFrame | None:
     return df
 
 
-def load_data() -> dict[str, pd.DataFrame | None]:
-    # Sengaja tidak memakai st.cache_data agar setiap run membaca file CSV terbaru.
-    return {
-        "prices": read_csv_current(first_existing(PRICE_PATHS)),
-        "news": read_csv_current(first_existing(NEWS_PATHS)),
-        "articles": read_csv_current(first_existing(ARTICLE_PATHS)),
-        "daily": read_csv_current(first_existing(DAILY_SENTIMENT_PATHS)),
-        "master": read_csv_current(first_existing(MASTER_PATHS)),
-        "eval_global": read_csv_current(first_existing(EVAL_GLOBAL_PATHS)),
-        "eval_ticker": read_csv_current(first_existing(EVAL_TICKER_PATHS)),
-        "eval_horizon": read_csv_current(first_existing(EVAL_HORIZON_PATHS)),
-        "attention": read_csv_current(first_existing(ATTENTION_PATHS)),
-        "predictions": read_csv_current(first_existing(PREDICTION_PATHS)),
-    }
+@st.cache_data(show_spinner=False, ttl=120)
+def load_all_data() -> dict[str, pd.DataFrame | None]:
+    return {name: read_csv_current(first_existing(paths)) for name, paths in PATHS.items()}
 
 
-def prep_master_for_model(df: pd.DataFrame | None) -> pd.DataFrame:
+def ticker_options(data: dict[str, pd.DataFrame | None]) -> list[str]:
+    for key in ["master", "prices", "daily", "news"]:
+        source = data.get(key)
+        if source is not None and "ticker" in source.columns:
+            values = source["ticker"].dropna().astype(str).unique().tolist()
+            if values:
+                return sorted(values)
+    return []
+
+
+def global_date_range(data: dict[str, pd.DataFrame | None]) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    for key in ["master", "prices", "daily", "news"]:
+        source = data.get(key)
+        dc = date_col(source)
+        if source is not None and dc:
+            valid = source[dc].dropna()
+            if not valid.empty:
+                return pd.to_datetime(valid.min()), pd.to_datetime(valid.max())
+    return None
+
+
+# ============================================================
+# 4. DATA UPDATE
+# ============================================================
+def marker_is_today() -> bool:
+    try:
+        return UPDATE_MARKER.exists() and UPDATE_MARKER.read_text(encoding="utf-8").strip() == today_jakarta()
+    except Exception:
+        return False
+
+
+def run_data_update_once_per_day(enabled: bool) -> list[str]:
+    logs: list[str] = []
+    if not enabled or marker_is_today():
+        return logs
+    with st.status("Memperbarui data harian. Model tidak dilatih ulang.", expanded=False) as status:
+        for label, cmd in AUTO_DATA_COMMANDS:
+            joined = " ".join(cmd)
+            if "gpt_sentiment_labeling" in joined and not os.getenv("OPENAI_API_KEY"):
+                logs.append(f"SKIP {label}: OPENAI_API_KEY belum tersedia")
+                continue
+            status.update(label=f"Menjalankan: {label}")
+            try:
+                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=AUTO_COMMAND_TIMEOUT_SECONDS)
+                if result.returncode == 0:
+                    logs.append(f"OK {label}")
+                else:
+                    tail = (result.stderr or result.stdout or "").strip().splitlines()[-4:]
+                    logs.append(f"GAGAL {label}: {' | '.join(tail)}")
+            except Exception as exc:
+                logs.append(f"GAGAL {label}: {type(exc).__name__}: {exc}")
+        try:
+            UPDATE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            UPDATE_MARKER.write_text(today_jakarta(), encoding="utf-8")
+        except Exception as exc:
+            logs.append(f"GAGAL menulis marker update: {type(exc).__name__}: {exc}")
+        status.update(label="Update data selesai", state="complete")
+    return logs
+
+
+# ============================================================
+# 5. CHECKPOINT AND PREDICTION ENGINE
+# ============================================================
+def clean_cpu_object(obj: Any) -> Any:
+    if torch is not None:
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu()
+        if isinstance(obj, torch.device):
+            return torch.device("cpu")
+    if isinstance(obj, dict):
+        cleaned = {}
+        for key, value in obj.items():
+            low = norm(key)
+            if low in {"device", "devices", "accelerator", "gpus", "gpu", "strategy", "maplocation"}:
+                if low == "accelerator":
+                    cleaned[key] = "cpu"
+                elif low in {"gpus", "gpu"}:
+                    cleaned[key] = 0
+                elif low == "devices":
+                    cleaned[key] = 1
+                else:
+                    cleaned[key] = "cpu"
+            else:
+                cleaned[key] = clean_cpu_object(value)
+        return cleaned
+    if isinstance(obj, list):
+        return [clean_cpu_object(item) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(clean_cpu_object(item) for item in obj)
+    if isinstance(obj, str) and obj.lower() == "cuda":
+        return "cpu"
+    return obj
+
+
+def find_key_recursive(obj: Any, target_key: str) -> Any | None:
+    if isinstance(obj, dict):
+        if target_key in obj:
+            return obj[target_key]
+        for value in obj.values():
+            found = find_key_recursive(value, target_key)
+            if found is not None:
+                return found
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            found = find_key_recursive(item, target_key)
+            if found is not None:
+                return found
+    return None
+
+
+def remove_key_recursive(obj: Any, target_key: str) -> int:
+    removed = 0
+    if isinstance(obj, dict):
+        if target_key in obj:
+            obj.pop(target_key, None)
+            removed += 1
+        for value in list(obj.values()):
+            removed += remove_key_recursive(value, target_key)
+    elif isinstance(obj, list):
+        for item in obj:
+            removed += remove_key_recursive(item, target_key)
+    elif isinstance(obj, tuple):
+        for item in obj:
+            removed += remove_key_recursive(item, target_key)
+    return removed
+
+
+@st.cache_data(show_spinner=False)
+def model_lengths() -> tuple[int, int]:
+    if yaml is None or not CONFIG_PATH.exists():
+        return 15, 3
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        data_cfg = cfg.get("data", cfg)
+        return int(data_cfg.get("max_encoder_length", 15)), int(data_cfg.get("max_prediction_length", 3))
+    except Exception:
+        return 15, 3
+
+
+@st.cache_resource(show_spinner=False)
+def load_tft(path_text: str):
+    path = Path(path_text)
+    if TemporalFusionTransformer is None or torch is None:
+        return None, f"pytorch_forecasting/torch belum tersedia: {IMPORT_MODEL_ERROR}"
+    if not path.exists():
+        return None, f"checkpoint tidak ditemukan: {path}"
+    if path.stat().st_size < 1024:
+        return None, f"checkpoint terlalu kecil/kosong: {path}. Pastikan Git LFS atau file .ckpt asli tersedia."
+
+    try:
+        checkpoint = torch.load(str(path), map_location=torch.device("cpu"), weights_only=False)
+    except Exception as exc:
+        return None, f"gagal membaca checkpoint: {type(exc).__name__}: {exc}"
+
+    dataset_params = find_key_recursive(checkpoint, "dataset_parameters") if isinstance(checkpoint, dict) else None
+
+    def attach_params(model):
+        if dataset_params is not None:
+            try:
+                setattr(model, "dataset_parameters", dataset_params)
+            except Exception:
+                pass
+        try:
+            model.cpu()
+            model.eval()
+        except Exception:
+            pass
+        return model
+
+    # Direct load untuk checkpoint yang sudah kompatibel.
+    try:
+        model = TemporalFusionTransformer.load_from_checkpoint(
+            str(path),
+            map_location=torch.device("cpu"),
+            strict=False,
+        )
+        return attach_params(model), None
+    except Exception:
+        pass
+
+    if not isinstance(checkpoint, dict):
+        return None, "format checkpoint tidak dikenali"
+
+    checkpoint = clean_cpu_object(checkpoint)
+    removed: list[str] = []
+    for key in [
+        "mask_bias", "logging_metrics", "monotone_constraints", "monotone_constaints",
+        "dataset_parameters", "loss", "accelerator", "devices", "gpus", "gpu", "strategy",
+    ]:
+        count = remove_key_recursive(checkpoint, key)
+        if count:
+            removed.append(f"{key}({count})")
+
+    clean_dir = ROOT / ".streamlit_ckpt_cache"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_cpu_clean.ckpt"
+    last_error = ""
+
+    for _ in range(60):
+        try:
+            torch.save(checkpoint, clean_path)
+            model = TemporalFusionTransformer.load_from_checkpoint(
+                str(clean_path),
+                map_location=torch.device("cpu"),
+                strict=False,
+            )
+            return attach_params(model), None
+        except TypeError as exc:
+            msg = str(exc)
+            last_error = msg
+            marker = "unexpected keyword argument '"
+            if marker not in msg:
+                return None, f"gagal load checkpoint: TypeError: {msg}. Dihapus: {removed}"
+            bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
+            count = remove_key_recursive(checkpoint, bad_key)
+            removed.append(f"{bad_key}({count})")
+            if count == 0:
+                return None, f"gagal load checkpoint: {msg}. Dihapus: {removed}"
+        except RuntimeError as exc:
+            msg = str(exc)
+            last_error = msg
+            if "nvidia" in msg.lower() or "cuda" in msg.lower():
+                checkpoint = clean_cpu_object(checkpoint)
+                for key in ["device", "devices", "accelerator", "gpus", "gpu", "strategy"]:
+                    count = remove_key_recursive(checkpoint, key)
+                    if count:
+                        removed.append(f"{key}({count})")
+                continue
+            return None, f"gagal load checkpoint: RuntimeError: {msg}. Dihapus: {removed}"
+        except Exception as exc:
+            return None, f"gagal load checkpoint: {type(exc).__name__}: {exc}. Dihapus: {removed}"
+
+    return None, f"gagal load checkpoint setelah CPU clean. Error terakhir: {last_error}. Dihapus: {removed}"
+
+
+def prepare_master(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty or "ticker" not in df.columns or "close" not in df.columns:
         return pd.DataFrame()
     out = df.copy()
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
-    out = out.dropna(subset=["ticker", "date"]) if "date" in out.columns else out.dropna(subset=["ticker"])
+        out = out.dropna(subset=["date"])
+    out = out.dropna(subset=["ticker"])
     out["ticker"] = out["ticker"].astype(str)
 
     if "time_idx" not in out.columns:
@@ -362,11 +609,11 @@ def prep_master_for_model(df: pd.DataFrame | None) -> pd.DataFrame:
         out["time_idx"] = out.groupby("ticker").cumcount()
     out["time_idx"] = pd.to_numeric(out["time_idx"], errors="coerce")
     if out["time_idx"].isna().any():
-        out = out.sort_values(["ticker", "date"])
+        out = out.sort_values(["ticker", "date"] if "date" in out.columns else ["ticker"])
         out["time_idx"] = out.groupby("ticker").cumcount()
     out["time_idx"] = out["time_idx"].astype("int64")
 
-    for col in ["day_of_week", "month", "is_month_end"]:
+    for col in CALENDAR_CATS:
         if col not in out.columns and "date" in out.columns:
             if col == "day_of_week":
                 out[col] = out["date"].dt.dayofweek
@@ -388,317 +635,80 @@ def prep_master_for_model(df: pd.DataFrame | None) -> pd.DataFrame:
     return out.sort_values(["ticker", "time_idx"]).reset_index(drop=True)
 
 
-# ============================================================
-# 5. FORECAST DARI CHECKPOINT SAJA
-# ============================================================
-@st.cache_resource(show_spinner=False)
-def load_tft(path_text: str):
-    """Load checkpoint TFT/LLM-TFT hanya di CPU.
-
-    Streamlit Cloud umumnya tidak menyediakan NVIDIA GPU. Checkpoint yang dilatih
-    di GPU kadang menyimpan device CUDA di hyperparameters/loss/metric object,
-    sehingga map_location saja belum cukup. Fungsi ini membaca checkpoint ke CPU,
-    membersihkan objek yang sering memicu CUDA, menyimpan checkpoint bersih, lalu
-    memuat model dari checkpoint bersih.
-    """
-    path = Path(path_text)
-
-    if TemporalFusionTransformer is None or torch is None:
-        return None, f"pytorch_forecasting atau torch belum tersedia. Detail: {IMPORT_MODEL_ERROR}"
-
-    if not path.exists():
-        return None, f"checkpoint tidak ditemukan: {path}"
-
-    if path.stat().st_size < 1024:
-        return None, (
-            f"checkpoint terlihat terlalu kecil atau kosong: {path}. "
-            "Pastikan file .ckpt asli ikut ter-commit atau Git LFS aktif di Streamlit Cloud."
-        )
-
-    try:
-        torch.set_grad_enabled(False)
-        if hasattr(torch, "set_default_device"):
-            torch.set_default_device("cpu")
-    except Exception:
-        pass
-
-    def cpu_map(storage, _location):
-        return storage.cpu()
-
-    def find_key_recursive(obj, target_key: str):
-        if isinstance(obj, dict):
-            if target_key in obj:
-                return obj[target_key]
-            for value in obj.values():
-                found = find_key_recursive(value, target_key)
-                if found is not None:
-                    return found
-        elif isinstance(obj, (list, tuple)):
-            for item in obj:
-                found = find_key_recursive(item, target_key)
-                if found is not None:
-                    return found
-        return None
-
-    def remove_key_recursive(obj, target_key: str) -> int:
-        removed = 0
-        if isinstance(obj, dict):
-            if target_key in obj:
-                obj.pop(target_key, None)
-                removed += 1
-            for value in list(obj.values()):
-                removed += remove_key_recursive(value, target_key)
-        elif isinstance(obj, list):
-            for item in obj:
-                removed += remove_key_recursive(item, target_key)
-        elif isinstance(obj, tuple):
-            for item in obj:
-                removed += remove_key_recursive(item, target_key)
-        return removed
-
-    def force_cpu_recursive(obj):
-        """Pindahkan tensor/device CUDA ke CPU tanpa mengubah struktur utama."""
-        try:
-            if torch.is_tensor(obj):
-                return obj.detach().cpu()
-        except Exception:
-            pass
-
-        if isinstance(obj, torch.device):
-            return torch.device("cpu")
-
-        if isinstance(obj, dict):
-            cleaned = {}
-            for key, value in obj.items():
-                key_norm = norm(key)
-                if key_norm in {"device", "accelerator", "devices", "gpus", "autoselectgpus"}:
-                    # Jangan bawa konfigurasi GPU dari training ke deployment CPU.
-                    if key_norm == "accelerator":
-                        cleaned[key] = "cpu"
-                    elif key_norm == "device":
-                        cleaned[key] = torch.device("cpu")
-                    elif key_norm == "devices":
-                        cleaned[key] = 1
-                    else:
-                        cleaned[key] = None
-                else:
-                    cleaned[key] = force_cpu_recursive(value)
-            return cleaned
-
-        if isinstance(obj, list):
-            return [force_cpu_recursive(item) for item in obj]
-
-        if isinstance(obj, tuple):
-            return tuple(force_cpu_recursive(item) for item in obj)
-
-        # Beberapa object metric/loss lama menyimpan atribut device CUDA.
-        if hasattr(obj, "__dict__"):
-            try:
-                for attr, value in list(vars(obj).items()):
-                    if norm(attr) in {"device", "accelerator", "devices", "gpus"}:
-                        setattr(obj, attr, torch.device("cpu"))
-                    else:
-                        setattr(obj, attr, force_cpu_recursive(value))
-            except Exception:
-                pass
-        return obj
-
-    def attach_dataset_parameters(model, params):
-        if params is not None:
-            try:
-                setattr(model, "dataset_parameters", params)
-            except Exception:
-                pass
-        try:
-            model.eval()
-            model.cpu()
-            for param in model.parameters():
-                param.requires_grad_(False)
-        except Exception:
-            pass
-        return model
-
-    try:
-        ckpt = torch.load(str(path), map_location=cpu_map, weights_only=False)
-        ckpt = force_cpu_recursive(ckpt)
-        saved_dataset_parameters = find_key_recursive(ckpt, "dataset_parameters") if isinstance(ckpt, dict) else None
-    except Exception as exc:
-        return None, f"gagal membaca checkpoint dalam mode CPU: {type(exc).__name__}: {exc}"
-
-    if not isinstance(ckpt, dict):
-        try:
-            model = TemporalFusionTransformer.load_from_checkpoint(str(path), map_location="cpu", strict=False)
-            return attach_dataset_parameters(model, None), None
-        except Exception as exc:
-            return None, f"gagal load checkpoint non-dict di CPU: {type(exc).__name__}: {exc}"
-
-    removed_keys = []
-    clean_dir = ROOT / ".streamlit_ckpt_cache"
-    clean_dir.mkdir(parents=True, exist_ok=True)
-    clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_cpu_clean.ckpt"
-    last_error = None
-
-    # Kunci ini tidak dibutuhkan untuk inference dan sering memicu error versi/CUDA.
-    always_remove = [
-        "mask_bias",
-        "logging_metrics",
-        "monotone_constraints",
-        "monotone_constaints",
-        "loss",
-        "optimizer",
-        "optimizer_params",
-        "lr_scheduler",
-        "reduce_on_plateau_patience",
+def add_missing_model_columns(sample: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    out = sample.copy()
+    categorical_keys = [
+        "static_categoricals", "time_varying_known_categoricals", "time_varying_unknown_categoricals",
     ]
-    for bad_key in always_remove:
-        count = remove_key_recursive(ckpt, bad_key)
-        if count > 0:
-            removed_keys.append(f"{bad_key}({count})")
-
-    # Bersihkan metadata trainer/checkpoint yang mengarah ke GPU.
-    if "hyper_parameters" in ckpt and isinstance(ckpt["hyper_parameters"], dict):
-        hp = ckpt["hyper_parameters"]
-        hp["accelerator"] = "cpu"
-        hp["devices"] = 1
-        hp.pop("gpus", None)
-        hp.pop("auto_select_gpus", None)
-
-    for _ in range(80):
-        try:
-            ckpt = force_cpu_recursive(ckpt)
-            torch.save(ckpt, clean_path)
-            model = TemporalFusionTransformer.load_from_checkpoint(
-                str(clean_path),
-                map_location="cpu",
-                strict=False,
-            )
-            return attach_dataset_parameters(model, saved_dataset_parameters), None
-
-        except TypeError as exc:
-            msg = str(exc)
-            last_error = msg
-            marker = "unexpected keyword argument '"
-            if marker not in msg:
-                return None, f"gagal load checkpoint CPU: TypeError: {msg}. Parameter dihapus: {removed_keys}"
-
-            bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
-            if not bad_key:
-                return None, f"gagal load checkpoint CPU: TypeError: {msg}. Parameter dihapus: {removed_keys}"
-
-            count = remove_key_recursive(ckpt, bad_key)
-            removed_keys.append(f"{bad_key}({count})")
-            if count == 0:
-                return None, (
-                    f"gagal load checkpoint CPU: TypeError: {msg}. "
-                    f"Parameter tidak ditemukan saat recursive-clean. Parameter dihapus: {removed_keys}"
-                )
-
-        except RuntimeError as exc:
-            msg = str(exc)
-            last_error = msg
-            cuda_markers = ["cuda", "nvidia", "gpu"]
-            if any(marker in msg.lower() for marker in cuda_markers):
-                # Jika masih ada jejak CUDA, bersihkan loss/metric/object tambahan lalu ulangi.
-                extra_remove = ["loss", "logging_metrics", "metrics", "metric", "device", "accelerator", "devices", "gpus"]
-                removed_any = 0
-                for bad_key in extra_remove:
-                    count = remove_key_recursive(ckpt, bad_key)
-                    removed_any += count
-                    if count > 0:
-                        removed_keys.append(f"{bad_key}({count})")
-                ckpt = force_cpu_recursive(ckpt)
-                if removed_any > 0:
-                    continue
-            return None, f"gagal load checkpoint CPU: RuntimeError: {msg}. Parameter dihapus: {removed_keys}"
-
-        except Exception as exc:
-            return None, (
-                f"gagal load checkpoint CPU: {type(exc).__name__}: {exc}. "
-                f"Parameter dihapus: {removed_keys}"
-            )
-
-    return None, (
-        f"gagal load checkpoint CPU setelah auto-clean. "
-        f"Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
-    )
-    
-@st.cache_data(show_spinner=False)
-def model_config() -> tuple[int, int]:
-    if yaml is None or not CONFIG_PATH.exists():
-        return 15, 3
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as file:
-            cfg = yaml.safe_load(file) or {}
-        data_cfg = cfg.get("data", cfg)
-        return int(data_cfg.get("max_encoder_length", 15)), int(data_cfg.get("max_prediction_length", 3))
-    except Exception:
-        return 15, 3
-
-
-def next_business_dates(start: pd.Timestamp, periods: int) -> pd.DatetimeIndex:
-    return pd.bdate_range(start=start + pd.Timedelta(days=1), periods=periods)
+    real_keys = [
+        "static_reals", "time_varying_known_reals", "time_varying_unknown_reals",
+    ]
+    for key in categorical_keys:
+        for col in params.get(key, []) or []:
+            if col not in out.columns:
+                out[col] = "0"
+            out[col] = out[col].astype(str)
+    for key in real_keys:
+        for col in params.get(key, []) or []:
+            if col not in out.columns:
+                out[col] = 0.0
+            out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0.0).astype("float32")
+    return out
 
 
 def append_future_rows(data: pd.DataFrame, horizon: int) -> pd.DataFrame:
     if data.empty or horizon <= 0:
         return data
     last = data.iloc[-1].copy()
-    future_rows = []
-    dates = next_business_dates(pd.to_datetime(last["date"]), horizon) if "date" in data.columns else [None] * horizon
-    last_time_idx = int(last["time_idx"])
+    last_date = pd.to_datetime(last["date"]) if "date" in data.columns and pd.notna(last.get("date")) else None
+    future_dates = pd.bdate_range(last_date + pd.Timedelta(days=1), periods=horizon) if last_date is not None else [None] * horizon
+    rows = []
     for i in range(horizon):
         row = last.copy()
-        row["time_idx"] = last_time_idx + i + 1
-        if "date" in data.columns:
-            row["date"] = pd.Timestamp(dates[i])
-            row["day_of_week"] = str(pd.Timestamp(dates[i]).dayofweek)
-            row["month"] = str(pd.Timestamp(dates[i]).month)
-            row["is_month_end"] = str(int(pd.Timestamp(dates[i]).is_month_end))
-        # nilai future hanya placeholder agar TimeSeriesDataSet dapat membentuk decoder.
+        row["time_idx"] = int(last["time_idx"]) + i + 1
+        if last_date is not None:
+            dt = pd.Timestamp(future_dates[i])
+            row["date"] = dt
+            row["day_of_week"] = str(dt.dayofweek)
+            row["month"] = str(dt.month)
+            row["is_month_end"] = str(int(dt.is_month_end))
         if "volume" in row:
             row["volume"] = 0.0
-        future_rows.append(row)
-    return pd.concat([data, pd.DataFrame(future_rows)], ignore_index=True)
+        rows.append(row)
+    return pd.concat([data, pd.DataFrame(rows)], ignore_index=True)
 
 
-def make_dataset_from_checkpoint(master: pd.DataFrame, ticker: str | None, cutoff, model) -> tuple[TimeSeriesDataSet | None, str | None]:
-    if TimeSeriesDataSet is None or master is None or master.empty:
-        return None, "library atau dataset master belum tersedia"
-
-    enc_default, pred_default = model_config()
-    params = getattr(model, "dataset_parameters", None) or {}
-    enc = int(params.get("max_encoder_length", enc_default))
-    pred = int(params.get("max_prediction_length", pred_default))
-
-    work = prep_master_for_model(master)
+def build_prediction_dataset(master: pd.DataFrame, ticker: str, cutoff: pd.Timestamp | None, model) -> tuple[TimeSeriesDataSet | None, str | None]:
+    if TimeSeriesDataSet is None:
+        return None, "pytorch_forecasting belum tersedia"
+    work = prepare_master(master)
     if work.empty:
-        return None, "dataset master kosong atau kolom wajib belum ada"
+        return None, "dataset master kosong atau kolom wajib belum tersedia"
 
-    selected_ticker = ticker or sorted(work["ticker"].dropna().astype(str).unique())[0]
-    data = work[work["ticker"].astype(str).eq(str(selected_ticker))].copy()
+    data = work[work["ticker"].astype(str).eq(str(ticker))].copy()
     if data.empty:
-        return None, f"ticker {selected_ticker} tidak ada di dataset master"
-
+        return None, f"ticker {ticker} tidak tersedia di dataset master"
     dc = date_col(data)
     if cutoff is not None and dc:
         data = data[data[dc] <= pd.to_datetime(cutoff)]
     data = data.sort_values("time_idx")
+
+    enc_default, pred_default = model_lengths()
+    params = getattr(model, "dataset_parameters", None) or {}
+    enc = int(params.get("max_encoder_length", enc_default))
+    pred = int(params.get("max_prediction_length", pred_default))
     if len(data) < enc:
         return None, f"data encoder kurang dari {enc} baris"
 
-    sample = data.tail(enc).copy()
-    sample = append_future_rows(sample, pred)
+    sample = append_future_rows(data.tail(enc).copy(), pred)
+    sample = add_missing_model_columns(sample, params)
 
     try:
-        dataset = TimeSeriesDataSet.from_parameters(params, sample, predict=True, stop_randomization=True)
-        return dataset, None
+        return TimeSeriesDataSet.from_parameters(params, sample, predict=True, stop_randomization=True), None
     except Exception as first_exc:
         try:
-            model_reals = list(params.get("time_varying_unknown_reals", []))
-            if not model_reals:
-                model_reals = TECH_FEATURES + SENT_FEATURES + COMPAT_SENT_FEATURES
-            available_reals = [c for c in model_reals if c in sample.columns]
-            available_cats = [c for c in ["day_of_week", "month", "is_month_end"] if c in sample.columns]
+            reals = [c for c in TECH_FEATURES + SENT_FEATURES + COMPAT_SENT_FEATURES if c in sample.columns]
+            cats = [c for c in CALENDAR_CATS if c in sample.columns]
             dataset = TimeSeriesDataSet(
                 sample,
                 time_idx="time_idx",
@@ -709,8 +719,8 @@ def make_dataset_from_checkpoint(master: pd.DataFrame, ticker: str | None, cutof
                 min_prediction_length=pred,
                 max_prediction_length=pred,
                 static_categoricals=["ticker"],
-                time_varying_known_categoricals=available_cats,
-                time_varying_unknown_reals=available_reals,
+                time_varying_known_categoricals=cats,
+                time_varying_unknown_reals=reals,
                 target_normalizer=GroupNormalizer(groups=["ticker"], transformation="softplus") if GroupNormalizer else None,
                 add_relative_time_idx=True,
                 add_target_scales=True,
@@ -722,184 +732,53 @@ def make_dataset_from_checkpoint(master: pd.DataFrame, ticker: str | None, cutof
             return None, f"gagal membuat dataset prediksi: {type(first_exc).__name__}: {first_exc}; fallback: {type(second_exc).__name__}: {second_exc}"
 
 
-def tensor_to_list(output) -> list[float]:
+def tensor_to_values(output: Any, horizon: int = 3) -> list[float]:
     if hasattr(output, "output"):
         output = output.output
     if isinstance(output, tuple):
         output = output[0]
     if hasattr(output, "detach"):
         output = output.detach().cpu().numpy()
-    try:
-        return pd.Series(np.asarray(output).reshape(-1)).dropna().astype(float).tolist()[:3]
-    except Exception:
-        return []
+    arr = np.asarray(output).reshape(-1)
+    return pd.Series(arr).dropna().astype(float).tolist()[:horizon]
 
 
-def predict_checkpoints(master: pd.DataFrame | None, ticker: str | None, cutoff) -> tuple[pd.DataFrame, list[str]]:
-    rows: list[dict] = []
-    errors: list[str] = []
-
-
-
+def predict_checkpoints(master: pd.DataFrame | None, ticker: str | None, cutoff: pd.Timestamp | None) -> tuple[pd.DataFrame, list[str]]:
     if master is None or master.empty:
         return pd.DataFrame(), ["dataset master belum tersedia"]
+    if not ticker:
+        options = sorted(master["ticker"].dropna().astype(str).unique().tolist()) if "ticker" in master.columns else []
+        ticker = options[0] if options else None
+    if not ticker:
+        return pd.DataFrame(), ["ticker belum tersedia"]
 
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
     for model_name, scenario, ckpt in CHECKPOINTS:
-        model, err = load_tft(str(ckpt))
         key = f"{model_name} {scenario}"
+        model, err = load_tft(str(ckpt))
         if err:
             errors.append(f"{key}: {err}")
             continue
-        dataset, err = make_dataset_from_checkpoint(master, ticker, cutoff, model)
+        dataset, err = build_prediction_dataset(master, ticker, cutoff, model)
         if err:
             errors.append(f"{key}: {err}")
             continue
         try:
             loader = dataset.to_dataloader(train=False, batch_size=1, num_workers=0)
             with torch.no_grad():
-                values = tensor_to_list(model.predict(loader, mode="prediction", return_x=False))
-            for idx, value in enumerate(values[:3], start=1):
-                rows.append({"Series": model_name, "Scenario": scenario, "Step": idx, "Harga": float(value), "Model": key})
+                output = model.predict(loader, mode="prediction", return_x=False)
+            values = tensor_to_values(output, horizon=3)
+            for step, value in enumerate(values, start=1):
+                rows.append({"Model": model_name, "Scenario": scenario, "Series": key, "Horizon": f"H+{step}", "Step": step, "Prediction": float(value)})
         except Exception as exc:
             errors.append(f"{key}: gagal prediksi - {type(exc).__name__}: {exc}")
     return pd.DataFrame(rows), errors
 
 
 # ============================================================
-# 6. MODEL DAN PREDIKSI
+# 6. EVALUATION HELPERS
 # ============================================================
-def sort_column(df: pd.DataFrame | None) -> str | None:
-    return date_col(df) or ("time_idx" if df is not None and "time_idx" in df.columns else None)
-
-
-def latest_close(master: pd.DataFrame | None) -> float | None:
-    if master is None or master.empty or "close" not in master.columns:
-        return None
-    sort_col = sort_column(master)
-    work = master.sort_values(sort_col) if sort_col else master
-    close = pd.to_numeric(work["close"], errors="coerce").dropna()
-    return float(close.tail(1).iloc[-1]) if not close.empty else None
-
-
-def encoder_df(master: pd.DataFrame | None, ticker: str | None, dates, n: int = 15) -> pd.DataFrame:
-    df = filter_df(master, ticker, dates)
-    if df is None or df.empty or "close" not in df.columns:
-        return pd.DataFrame()
-    work = df.copy()
-    if "ticker" in work.columns and not ticker:
-        scol = sort_column(work)
-        tick = work.sort_values(scol).tail(1)["ticker"].iloc[0] if scol else work["ticker"].iloc[0]
-        work = work[work["ticker"].eq(tick)]
-    scol = sort_column(work)
-    work = work.sort_values(scol) if scol else work
-    enc = work.tail(n).copy()
-    if enc.empty:
-        return pd.DataFrame()
-    enc["Step"] = list(range(-len(enc) + 1, 1))
-    enc["Harga"] = pd.to_numeric(enc["close"], errors="coerce")
-    enc["Series"] = "Encoder 15 Hari"
-    return enc[["Step", "Harga", "Series"]]
-
-
-def combined_chart(master: pd.DataFrame | None, ticker: str | None, dates, pred_df: pd.DataFrame) -> None:
-    rows: list[dict] = []
-    enc = encoder_df(master, ticker, dates)
-    if not enc.empty:
-        rows.extend(enc.to_dict("records"))
-    latest = rows[-1]["Harga"] if rows else None
-    if pred_df is not None and not pred_df.empty:
-        for series, group in pred_df.groupby("Series"):
-            if latest is not None:
-                rows.append({"Step": 0, "Harga": latest, "Series": series})
-            rows.extend(group[["Step", "Harga", "Series"]].to_dict("records"))
-    chart = pd.DataFrame(rows).dropna(subset=["Harga"]) if rows else pd.DataFrame()
-    st.subheader("Encoder 15 Hari dan Prediksi Multi-Horizon")
-    if chart.empty:
-        st.info("Data encoder dan prediksi belum tersedia.")
-        return
-    fig = px.line(
-        chart.sort_values(["Series", "Step"]),
-        x="Step", y="Harga", color="Series", markers=True,
-        title="Aktual Encoder vs Prediksi TFT S5 dan LLM-TFT S1",
-        color_discrete_map=MODEL_COLORS,
-    )
-    fig.update_traces(line=dict(width=4), marker=dict(size=10))
-    ticks = list(range(-14, 4))
-    labels = [f"T{x}" if x < 0 else ("T" if x == 0 else f"H+{x}") for x in ticks]
-    fig.update_xaxes(tickmode="array", tickvals=ticks, ticktext=labels, title="Langkah Waktu")
-    fig.update_yaxes(title="Harga Close / Prediksi")
-    fig.add_vline(x=0, line_dash="dash", line_color="rgba(255,255,255,0.45)")
-    st.plotly_chart(layout(fig, 470), use_container_width=True)
-
-
-def selected_predictions(pred_df: pd.DataFrame) -> dict[str, float | None]:
-    if pred_df is None or pred_df.empty:
-        return {"H+1": None, "H+2": None, "H+3": None}
-    selected = pred_df[pred_df["Series"].eq("LLM-TFT")]
-    selected = selected if not selected.empty else pred_df
-    return {f"H+{int(row.Step)}": row.Harga for row in selected.itertuples()}
-
-
-def render_model_page(data: dict, ticker: str | None, dates) -> None:
-    header("StockForecast", "Prediksi saham Indonesia memakai checkpoint TFT S5 dan LLM-TFT S1. Tidak ada training ulang dari dashboard.")
-    master_filtered = filter_df(data["master"], ticker, dates)
-    dc = date_col(master_filtered)
-    cutoff = pd.to_datetime(master_filtered[dc]).max() if master_filtered is not None and not master_filtered.empty and dc else None
-
-    run_prediction = st.button("Jalankan Prediksi dari Checkpoint")
-
-    if run_prediction:
-        with st.spinner("Memuat checkpoint TFT S5 dan LLM-TFT S1..."):
-            pred_df, errors = predict_checkpoints(data["master"], ticker, cutoff)
-    else:
-        pred_df = pd.DataFrame()
-        errors = ["Klik tombol Jalankan Prediksi dari Checkpoint untuk memuat model."]
-    chosen = selected_predictions(pred_df)
-    close = latest_close(master_filtered)
-
-    cards = st.columns(4)
-    cards[0].metric("Dataset", fmt(len(master_filtered) if master_filtered is not None else 0))
-    for card, horizon in zip(cards[1:], ["H+1", "H+2", "H+3"]):
-        value = chosen.get(horizon)
-        delta = f"{((value - close) / close) * 100:+.2f}%" if value is not None and close else None
-        card.metric(horizon, rupiah(value) if value is not None else "-", delta)
-
-    if errors:
-        with st.expander("Catatan checkpoint", expanded=True):
-            for err in errors:
-                st.warning(err)
-
-    combined_chart(master_filtered, ticker, dates, pred_df)
-
-    if pred_df is not None and not pred_df.empty:
-        table = pred_df.pivot_table(index="Step", columns="Series", values="Harga", aggfunc="last").reset_index()
-        table["Horizon"] = table["Step"].apply(lambda x: f"H+{int(x)}")
-        show_cols = ["Horizon"] + [col for col in ["TFT", "LLM-TFT"] if col in table.columns]
-        for col in ["TFT", "LLM-TFT"]:
-            if col in table.columns:
-                table[col] = table[col].apply(rupiah)
-        st.dataframe(table[show_cols], use_container_width=True, hide_index=True)
-
-    show_split_chart(master_filtered)
-
-
-def show_split_chart(master: pd.DataFrame | None) -> None:
-    if master is None or master.empty or "split" not in master.columns:
-        return
-    split = master["split"].value_counts().reset_index()
-    split.columns = ["Split", "Jumlah"]
-    fig = px.bar(split, x="Split", y="Jumlah", title="Distribusi Data Model", color="Split", color_discrete_sequence=COLORS, text_auto=True)
-    st.plotly_chart(layout(fig), use_container_width=True)
-
-
-# ============================================================
-# 7. EVALUASI MODEL
-# ============================================================
-MODEL_CANDIDATES = ["model", "scenario", "skenario", "method", "metode", "variant"]
-HORIZON_CANDIDATES = ["horizon", "h", "step", "forecast_horizon"]
-TICKER_CANDIDATES = ["ticker", "symbol", "emiten", "kode_saham"]
-METRIC_NAME = ["metric", "metrics", "metrik", "measure"]
-VALUE_COLS = ["value", "nilai", "score", "hasil"]
 ALIASES = {
     "RMSE": ["rmse", "rootmeansquarederror"],
     "MAE": ["mae", "meanabsoluteerror"],
@@ -911,7 +790,7 @@ ORDER = ["RMSE", "MAE", "MAPE", "R²", "Directional Accuracy"]
 LOWER_IS_BETTER = {"RMSE", "MAE", "MAPE"}
 
 
-def normalize_model(value) -> str:
+def normalize_model(value: Any) -> str:
     low = str(value).lower()
     if "llm" in low or "hybrid" in low or "sent" in low or "s1" in low:
         return "LLM-TFT"
@@ -920,49 +799,46 @@ def normalize_model(value) -> str:
     return str(value)
 
 
-def metric_name(col) -> str:
-    low = norm(col)
+def metric_name(value: Any) -> str:
+    low = norm(value)
     for name, aliases in ALIASES.items():
         if any(norm(alias) in low for alias in aliases):
             return name
-    return str(col).replace("_", " ").title()
+    return str(value).replace("_", " ").title()
 
 
-def metric_cols(df: pd.DataFrame) -> list[str]:
+def numeric_metric_cols(df: pd.DataFrame) -> list[str]:
     numeric = list(df.select_dtypes(include="number").columns)
-    return [c for c in numeric if norm(c) not in {"n", "count", "jumlah", "index"}]
-
-
-def row_dict(row, mcol, ncol, vcol, hcol, tcol) -> dict:
-    return {
-        "Model": normalize_model(row[mcol]),
-        "Metric": metric_name(row[ncol]),
-        "Value": pd.to_numeric(row[vcol], errors="coerce"),
-        "Horizon": row.get(hcol),
-        "Ticker": row.get(tcol),
-    }
+    return [col for col in numeric if norm(col) not in {"n", "count", "jumlah", "index"}]
 
 
 def long_eval(df: pd.DataFrame | None, scope: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     work = df.copy()
-    mcol = find_col(work, MODEL_CANDIDATES)
-    hcol = find_col(work, HORIZON_CANDIDATES)
-    tcol = find_col(work, TICKER_CANDIDATES)
-    ncol = find_col(work, METRIC_NAME)
-    vcol = find_col(work, VALUE_COLS)
+    mcol = find_col(work, ["model", "scenario", "skenario", "method", "metode", "variant"])
+    hcol = find_col(work, ["horizon", "h", "step", "forecast_horizon"])
+    tcol = find_col(work, ["ticker", "symbol", "emiten", "kode_saham"])
+    metric_col = find_col(work, ["metric", "metrics", "metrik", "measure"])
+    value_col = find_col(work, ["value", "nilai", "score", "hasil"])
     if not mcol:
-        work["Model"] = ["TFT", "LLM-TFT"][:len(work)] if len(work) <= 2 else "Model"
+        work["Model"] = ["TFT", "LLM-TFT"][: len(work)] if len(work) <= 2 else "Model"
         mcol = "Model"
+
     rows = []
-    if ncol and vcol:
+    if metric_col and value_col:
         for _, row in work.iterrows():
-            rows.append(row_dict(row, mcol, ncol, vcol, hcol, tcol))
+            rows.append({
+                "Model": normalize_model(row[mcol]),
+                "Metric": metric_name(row[metric_col]),
+                "Value": pd.to_numeric(row[value_col], errors="coerce"),
+                "Horizon": row.get(hcol),
+                "Ticker": row.get(tcol),
+            })
     else:
         for idx, row in work.iterrows():
             horizon = row.get(hcol) if hcol else (f"H+{(idx % 3) + 1}" if scope == "horizon" else None)
-            for col in metric_cols(work):
+            for col in numeric_metric_cols(work):
                 rows.append({
                     "Model": normalize_model(row[mcol]),
                     "Metric": metric_name(col),
@@ -970,318 +846,467 @@ def long_eval(df: pd.DataFrame | None, scope: str) -> pd.DataFrame:
                     "Horizon": horizon,
                     "Ticker": row.get(tcol) if tcol else None,
                 })
-    return pd.DataFrame(rows).dropna(subset=["Value"])
+    out = pd.DataFrame(rows)
+    return out.dropna(subset=["Value"]) if not out.empty else out
 
 
-def best_row(df: pd.DataFrame, metric: str):
-    data = df[df["Metric"].eq(metric)].copy()
-    if data.empty:
-        return None
-    idx = data["Value"].idxmin() if metric in LOWER_IS_BETTER else data["Value"].idxmax()
-    return data.loc[idx]
-
-
-def show_summary_cards(eval_global: pd.DataFrame | None) -> None:
+def best_rows(eval_global: pd.DataFrame | None) -> pd.DataFrame:
     data = long_eval(eval_global, "global")
-    st.subheader("Ringkasan Performa")
     if data.empty:
-        st.info("Ringkasan evaluasi belum tersedia.")
-        return
-    metrics = [m for m in ORDER if m in data["Metric"].unique().tolist()]
-    if not metrics:
-        st.info("Kolom metrik evaluasi belum sesuai atau belum tersedia.")
-        return
-    cols = st.columns(min(len(metrics), 5))
-    for col, metric in zip(cols, metrics):
-        row = best_row(data, metric)
-        if row is None:
-            continue
-        decimals = 3 if metric in {"MAPE", "R²", "Directional Accuracy"} else 0
-        suffix = "%" if metric in {"MAPE", "Directional Accuracy"} else ""
-        col.metric(metric, f"{fmt(row['Value'], decimals)}{suffix}", f"{row['Model']} · {'lebih kecil lebih baik' if metric in LOWER_IS_BETTER else 'lebih besar lebih baik'}")
-
-
-def show_eval(title: str, df: pd.DataFrame | None, scope: str, xfield: str | None = None) -> None:
-    data = long_eval(df, scope)
-    if data.empty:
-        st.info(f"{title} belum dapat ditampilkan.")
-        return
-    xaxis = xfield if xfield and data[xfield].notna().any() else "Model"
-    metrics = [m for m in ORDER if m in data["Metric"].unique().tolist()]
-    metrics += [m for m in data["Metric"].drop_duplicates().tolist() if m not in metrics]
-    cols = st.columns(2)
-    for i, metric in enumerate(metrics):
+        return pd.DataFrame()
+    rows = []
+    for metric in ORDER:
         subset = data[data["Metric"].eq(metric)]
-        with cols[i % 2]:
-            if scope == "horizon":
-                fig = px.line(subset, x=xaxis, y="Value", color="Model", markers=True, title=metric, color_discrete_map=MODEL_COLORS)
-                fig.update_traces(line=dict(width=3), marker=dict(size=9))
-            else:
-                fig = px.bar(subset, x=xaxis, y="Value", color="Model", barmode="group", title=metric, color_discrete_map=MODEL_COLORS, text_auto=True)
-            st.plotly_chart(layout(fig, 380), use_container_width=True)
+        if subset.empty:
+            continue
+        idx = subset["Value"].idxmin() if metric in LOWER_IS_BETTER else subset["Value"].idxmax()
+        rows.append(subset.loc[idx].to_dict())
+    return pd.DataFrame(rows)
 
 
-def attention_df(df: pd.DataFrame | None) -> pd.DataFrame:
+def metric_value(data: pd.DataFrame, model: str, metric: str) -> float | None:
+    subset = data[(data["Model"].eq(model)) & (data["Metric"].eq(metric))]
+    if subset.empty:
+        return None
+    return float(subset["Value"].iloc[0])
+
+
+def latest_close(df: pd.DataFrame | None) -> float | None:
+    if df is None or df.empty or "close" not in df.columns:
+        return None
+    dc = date_col(df)
+    work = df.sort_values(dc) if dc else df
+    values = pd.to_numeric(work["close"], errors="coerce").dropna()
+    return float(values.iloc[-1]) if not values.empty else None
+
+
+# ============================================================
+# 7. CHARTS
+# ============================================================
+def price_chart(df: pd.DataFrame | None, title: str = "Price action") -> None:
+    if df is None or df.empty:
+        st.info("Data harga belum tersedia.")
+        return
+    dc = date_col(df)
+    if not dc:
+        st.info("Kolom tanggal belum tersedia.")
+        return
+    work = df.sort_values(dc)
+    has_ohlc = all(col in work.columns for col in ["open", "high", "low", "close"])
+    if has_ohlc:
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=work[dc], open=work["open"], high=work["high"], low=work["low"], close=work["close"],
+            name="OHLC", increasing_line_color="#22C55E", decreasing_line_color="#F43F5E",
+        ))
+        fig.update_layout(xaxis_rangeslider_visible=False)
+    else:
+        fig = px.line(work, x=dc, y="close", title=title, color_discrete_sequence=[MODEL_COLORS["Aktual"]])
+        fig.update_traces(line=dict(width=3))
+    fig.update_yaxes(title="Harga")
+    st.plotly_chart(apply_fig_theme(fig, 430, title), use_container_width=True)
+
+
+def prediction_chart(master: pd.DataFrame | None, ticker: str | None, dates: Any, pred_df: pd.DataFrame) -> None:
+    filtered = filter_df(master, ticker, dates)
+    if filtered is None or filtered.empty or "close" not in filtered.columns:
+        st.info("Data encoder belum tersedia.")
+        return
+    dc = date_col(filtered)
+    work = filtered.sort_values(dc if dc else "time_idx").tail(15).copy()
+    work["Step"] = list(range(-len(work) + 1, 1))
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=work["Step"], y=work["close"], mode="lines+markers", name="Aktual encoder",
+        line=dict(color=MODEL_COLORS["Aktual"], width=3), marker=dict(size=7),
+    ))
+    last_close = float(pd.to_numeric(work["close"], errors="coerce").dropna().iloc[-1])
+    if pred_df is not None and not pred_df.empty:
+        for model_name, group in pred_df.groupby("Model"):
+            x_vals = [0] + group.sort_values("Step")["Step"].astype(int).tolist()
+            y_vals = [last_close] + group.sort_values("Step")["Prediction"].astype(float).tolist()
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, mode="lines+markers", name=model_name,
+                line=dict(color=MODEL_COLORS.get(model_name), width=4 if model_name == "LLM-TFT" else 3, dash="solid" if model_name == "LLM-TFT" else "dot"),
+                marker=dict(size=9),
+            ))
+    ticks = list(range(-14, 4))
+    labels = [f"T{x}" if x < 0 else ("T0" if x == 0 else f"H+{x}") for x in ticks]
+    fig.update_xaxes(tickmode="array", tickvals=ticks, ticktext=labels, title="Langkah waktu")
+    fig.update_yaxes(title="Harga close / prediksi")
+    fig.add_vline(x=0, line_dash="dash", line_color="rgba(255,255,255,0.42)")
+    st.plotly_chart(apply_fig_theme(fig, 470, "Encoder 15 hari dan prediksi multi-horizon"), use_container_width=True)
+
+
+def evaluation_bar(data: pd.DataFrame, metric: str) -> None:
+    subset = data[data["Metric"].eq(metric)]
+    if subset.empty:
+        return
+    fig = px.bar(subset, x="Model", y="Value", color="Model", text_auto=True, color_discrete_map=MODEL_COLORS)
+    fig.update_traces(marker_line_width=0, textposition="outside")
+    fig.update_yaxes(title=metric)
+    st.plotly_chart(apply_fig_theme(fig, 350, metric), use_container_width=True)
+
+
+def horizon_chart(df: pd.DataFrame | None) -> None:
+    data = long_eval(df, "horizon")
+    if data.empty:
+        st.info("Data evaluasi horizon belum tersedia.")
+        return
+    metric = st.selectbox("Metrik horizon", [m for m in ORDER if m in data["Metric"].unique()], key="metric_horizon_select")
+    subset = data[data["Metric"].eq(metric)].copy()
+    fig = px.line(subset, x="Horizon", y="Value", color="Model", markers=True, color_discrete_map=MODEL_COLORS)
+    fig.update_traces(line=dict(width=3), marker=dict(size=9))
+    st.plotly_chart(apply_fig_theme(fig, 390, f"Performa per horizon — {metric}"), use_container_width=True)
+
+
+def ticker_heatmap(df: pd.DataFrame | None) -> None:
+    data = long_eval(df, "ticker")
+    if data.empty or data["Ticker"].isna().all():
+        st.info("Data evaluasi per emiten belum tersedia.")
+        return
+    metric = st.selectbox("Metrik emiten", [m for m in ORDER if m in data["Metric"].unique()], key="metric_ticker_select")
+    subset = data[data["Metric"].eq(metric)].copy()
+    pivot = subset.pivot_table(index="Ticker", columns="Model", values="Value", aggfunc="mean")
+    if pivot.empty:
+        st.info("Pivot emiten belum dapat dibentuk.")
+        return
+    fig = px.imshow(pivot, text_auto=".3f", aspect="auto", color_continuous_scale="Bluered")
+    st.plotly_chart(apply_fig_theme(fig, 390, f"Heatmap emiten — {metric}"), use_container_width=True)
+
+
+def attention_chart(df: pd.DataFrame | None) -> None:
     if df is not None and not df.empty:
         step = find_col(df, ["encoder_step", "step", "time_step", "lag", "position"])
         weight = find_col(df, ["attention", "attention_weight", "weight", "value"])
         model = find_col(df, ["model", "scenario", "method"])
         if step and weight:
-            cols = [step, weight] + ([model] if model else [])
-            out = df[cols].copy().rename(columns={step: "Encoder Step", weight: "Attention Weight"})
+            out = df[[step, weight] + ([model] if model else [])].copy()
+            out = out.rename(columns={step: "Encoder Step", weight: "Attention Weight"})
             out["Model"] = out[model].apply(normalize_model) if model else "Attention"
-            return out[["Encoder Step", "Attention Weight", "Model"]]
-    return pd.DataFrame({
-        "Encoder Step": list(range(-14, 1)) * 2,
-        "Attention Weight": [54, 62, 68, 72, 75, 78, 81, 83, 85, 87, 90, 93, 96, 98, 101]
-        + [86, 79, 76, 75, 76, 78, 80, 82, 83, 84, 84, 85, 85, 86, 86],
-        "Model": ["TFT"] * 15 + ["LLM-TFT"] * 15,
-    })
-
-
-def show_attention(df: pd.DataFrame | None) -> None:
-    data = attention_df(df)
-    fig = px.line(data, x="Encoder Step", y="Attention Weight", color="Model", markers=True, title="Temporal Attention Pattern", color_discrete_map=MODEL_COLORS)
+        else:
+            out = pd.DataFrame()
+    else:
+        out = pd.DataFrame()
+    if out.empty:
+        out = pd.DataFrame({
+            "Encoder Step": list(range(-14, 1)) * 2,
+            "Attention Weight": [54, 62, 68, 72, 75, 78, 81, 83, 85, 87, 90, 93, 96, 98, 101]
+            + [86, 79, 76, 75, 76, 78, 80, 82, 83, 84, 84, 85, 85, 86, 86],
+            "Model": ["TFT"] * 15 + ["LLM-TFT"] * 15,
+        })
+    fig = px.line(out, x="Encoder Step", y="Attention Weight", color="Model", markers=True, color_discrete_map=MODEL_COLORS)
     fig.update_traces(line=dict(width=3), marker=dict(size=8))
-    st.plotly_chart(layout(fig, 420), use_container_width=True)
-
-
-def render_eval_page(data: dict, ticker: str | None, dates) -> None:
-    header("Evaluasi Model", "Menampilkan file evaluasi yang sudah tersedia. Dashboard tidak menjalankan evaluasi ulang.")
-    tabs = st.tabs(["Ringkasan", "Global", "Horizon", "Emiten", "Attention"])
-    with tabs[0]:
-        show_summary_cards(data["eval_global"])
-    with tabs[1]:
-        st.subheader("Evaluasi Global")
-        show_eval("Evaluasi Global", data["eval_global"], "global")
-    with tabs[2]:
-        st.subheader("Evaluasi per Horizon")
-        show_eval("Evaluasi per Horizon", data["eval_horizon"], "horizon", "Horizon")
-    with tabs[3]:
-        st.subheader("Evaluasi per Emiten")
-        show_eval("Evaluasi per Emiten", data["eval_ticker"], "ticker", "Ticker")
-    with tabs[4]:
-        st.subheader("Attention / Interpretabilitas")
-        show_attention(data["attention"])
+    st.plotly_chart(apply_fig_theme(fig, 400, "Temporal attention pattern"), use_container_width=True)
 
 
 # ============================================================
-# 8. DATA HARGA DAN BERITA
+# 8. PAGES
 # ============================================================
-def render_price_page(data: dict, ticker: str | None, dates) -> None:
-    header("Data Harga Saham")
-    df = filter_df(data["prices"], ticker, dates)
-    if df is None or df.empty:
-        st.warning("Data harga belum tersedia.")
-        return
-    show_price_section(df)
-    show_indicator_section(df)
+def sidebar(data: dict[str, pd.DataFrame | None]):
+    with st.sidebar:
+        st.markdown("## 📈 StockForecast Pro")
+        st.caption("TFT S5 · LLM‑TFT S1 · Indonesia stocks")
+        st.divider()
+        page = st.radio("Navigasi", list(PAGES.keys()), format_func=lambda x: x)
+        st.caption(PAGES[page])
+        st.divider()
+
+        tickers = ticker_options(data)
+        ticker = st.selectbox("Emiten", tickers, index=0) if tickers else None
+        drange = global_date_range(data)
+        dates = None
+        if drange:
+            start, end = drange
+            dates = st.date_input("Rentang tanggal", value=(start.date(), end.date()), min_value=start.date(), max_value=end.date())
+        st.divider()
+        auto_update = st.toggle("Auto update data harian", value=AUTO_UPDATE_DATA_ON_START)
+        st.caption(f"Tanggal run: {today_jakarta()}")
+    return page, ticker, dates, auto_update
 
 
-def show_price_section(df: pd.DataFrame) -> None:
-    st.subheader("Harga Saham")
-    dc = date_col(df) or "date"
-    latest = df.sort_values(dc).tail(1).iloc[0] if dc in df.columns else df.tail(1).iloc[0]
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Jumlah Baris", fmt(len(df)))
-    c2.metric("Jumlah Emiten", fmt(df["ticker"].nunique() if "ticker" in df.columns else 0))
-    c3.metric("Close Terakhir", rupiah(latest["close"]) if "close" in df.columns else "-")
-    if "close" in df.columns and dc in df.columns:
-        fig = px.line(df.sort_values(dc), x=dc, y="close", title="Harga Penutupan", color_discrete_sequence=COLORS)
-        fig.update_traces(line=dict(width=3))
-        st.plotly_chart(layout(fig), use_container_width=True)
+def page_overview(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
+    hero("Executive Overview", "Ringkasan cepat status data, performa model, dan kondisi harga terakhir untuk membantu membaca dashboard tanpa masuk ke detail teknis.")
+    master = filter_df(data["master"], ticker, dates)
+    prices = filter_df(data["prices"], ticker, dates)
+    eval_global = long_eval(data["eval_global"], "global")
 
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Baris master", fmt(len(master) if master is not None else 0))
+    c2.metric("Harga terakhir", rupiah(latest_close(master) or latest_close(prices)))
+    if not eval_global.empty:
+        rmse_tft = metric_value(eval_global, "TFT", "RMSE")
+        rmse_llm = metric_value(eval_global, "LLM-TFT", "RMSE")
+        dir_llm = metric_value(eval_global, "LLM-TFT", "Directional Accuracy")
+        improvement = ((rmse_tft - rmse_llm) / rmse_tft * 100) if rmse_tft and rmse_llm else None
+        c3.metric("RMSE improvement", pct(improvement) if improvement is not None else "-")
+        c4.metric("DirAcc LLM‑TFT", pct(dir_llm, 3) if dir_llm is not None else "-")
+    else:
+        c3.metric("RMSE improvement", "-")
+        c4.metric("DirAcc LLM‑TFT", "-")
 
-def show_indicator_section(df: pd.DataFrame) -> None:
-    st.subheader("Indikator Teknikal")
-    dc = date_col(df) or "date"
-    indicators = [c for c in TECH_FEATURES if c in df.columns and c not in {"close", "volume"}]
-    if not indicators:
-        st.info("Indikator teknikal belum tersedia.")
-        return
-
-    left, right = st.columns(2, gap="large")
-
+    left, right = st.columns([1.45, 1], gap="large")
     with left:
-        st.markdown("**Tren Indikator Teknikal**")
-        selected = st.selectbox("Pilih Indikator", indicators, key="technical_indicator_select")
-        if dc in df.columns:
-            fig = px.line(
-                df.sort_values(dc),
-                x=dc,
-                y=selected,
-                title=f"Tren {selected}",
-                color_discrete_sequence=COLORS,
-            )
-            fig.update_traces(line=dict(width=3))
-            fig.update_yaxes(title=selected)
-            st.plotly_chart(layout(fig, 500), use_container_width=True)
-        else:
-            st.info("Kolom tanggal tidak ditemukan untuk grafik tren indikator.")
-
+        price_chart(prices if prices is not None and not prices.empty else master, "Pergerakan harga terbaru")
     with right:
-        st.markdown("**Korelasi Indikator Teknikal**")
-        corr_cols = [c for c in indicators if pd.api.types.is_numeric_dtype(df[c])]
-        if len(corr_cols) >= 2:
-            corr = df[corr_cols].corr(numeric_only=True)
-            fig = px.imshow(
-                corr,
-                text_auto=".2f",
-                title="Korelasi Indikator Teknikal",
-                color_continuous_scale="Turbo",
-                aspect="auto",
-            )
-            fig.update_xaxes(tickangle=35)
-            st.plotly_chart(layout(fig, 500), use_container_width=True)
+        st.subheader("Model winner board")
+        best = best_rows(data["eval_global"])
+        if best.empty:
+            st.info("File evaluasi global belum tersedia.")
         else:
-            st.info("Kolom numerik indikator belum cukup untuk korelasi.")
+            show = best[["Metric", "Model", "Value"]].copy()
+            show["Value"] = show.apply(lambda r: pct(r["Value"], 3) if r["Metric"] in {"MAPE", "Directional Accuracy"} else fmt(r["Value"], 3 if r["Metric"] == "R²" else 0), axis=1)
+            st.dataframe(show, hide_index=True, use_container_width=True)
+        st.markdown("---")
+        panel("Desain: overview → prediksi → evaluasi → data → sentimen → health", "ok")
 
 
-def render_news_page(data: dict, ticker: str | None, dates) -> None:
-    header("Berita Keuangan dan Sentimen")
+def page_prediction(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
+    hero("Prediction Studio", "Prediksi multi-horizon memakai checkpoint final. Halaman ini hanya inference, tidak menjalankan training ulang.")
+    master_filtered = filter_df(data["master"], ticker, dates)
+    dc = date_col(master_filtered)
+    cutoff = pd.to_datetime(master_filtered[dc]).max() if master_filtered is not None and not master_filtered.empty and dc else None
+
+    cols = st.columns([1, 1, 1, 1.2])
+    cols[0].metric("Ticker", ticker or "-")
+    cols[1].metric("Encoder", f"{model_lengths()[0]} hari")
+    cols[2].metric("Horizon", f"{model_lengths()[1]} hari")
+    cols[3].metric("Cutoff", str(cutoff.date()) if cutoff is not None and pd.notna(cutoff) else "-")
+
+    run = st.button("Jalankan prediksi checkpoint", type="primary", use_container_width=True)
+    pred_df, errors = (pd.DataFrame(), ["Klik tombol prediksi untuk menjalankan inference CPU."])
+    if run:
+        with st.spinner("Memuat checkpoint dan menjalankan prediksi CPU..."):
+            pred_df, errors = predict_checkpoints(data["master"], ticker, cutoff)
+
+    close = latest_close(master_filtered)
+    pred_cards = st.columns(3)
+    chosen = pred_df[pred_df["Model"].eq("LLM-TFT")] if not pred_df.empty else pd.DataFrame()
+    for i, horizon in enumerate(["H+1", "H+2", "H+3"]):
+        row = chosen[chosen["Horizon"].eq(horizon)] if not chosen.empty else pd.DataFrame()
+        value = float(row["Prediction"].iloc[0]) if not row.empty else None
+        delta = f"{((value - close) / close) * 100:+.2f}%" if value is not None and close else None
+        pred_cards[i].metric(f"LLM‑TFT {horizon}", rupiah(value) if value is not None else "-", delta)
+
+    if errors:
+        with st.expander("Catatan inference", expanded=bool(run)):
+            for err in errors:
+                st.warning(err)
+
+    prediction_chart(data["master"], ticker, dates, pred_df)
+
+    if not pred_df.empty:
+        table = pred_df.pivot_table(index="Horizon", columns="Model", values="Prediction", aggfunc="last").reset_index()
+        for col in ["TFT", "LLM-TFT"]:
+            if col in table.columns:
+                table[col] = table[col].map(rupiah)
+        st.dataframe(table, hide_index=True, use_container_width=True)
+
+
+def page_performance(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
+    hero("Model Performance", "Evaluasi disusun agar pembaca cepat melihat model terbaik, konsistensi per horizon, performa per emiten, dan attention pattern.")
+    tabs = st.tabs(["Global", "Horizon", "Emiten", "Attention", "Raw tables"])
+    with tabs[0]:
+        eval_global = long_eval(data["eval_global"], "global")
+        if eval_global.empty:
+            st.info("Evaluasi global belum tersedia.")
+        else:
+            metrics = [m for m in ORDER if m in eval_global["Metric"].unique()]
+            cols = st.columns(min(3, len(metrics)) or 1)
+            for i, metric in enumerate(metrics[:3]):
+                with cols[i % len(cols)]:
+                    evaluation_bar(eval_global, metric)
+            if len(metrics) > 3:
+                cols2 = st.columns(2)
+                for i, metric in enumerate(metrics[3:]):
+                    with cols2[i % 2]:
+                        evaluation_bar(eval_global, metric)
+    with tabs[1]:
+        horizon_chart(data["eval_horizon"])
+    with tabs[2]:
+        ticker_heatmap(data["eval_ticker"])
+    with tabs[3]:
+        attention_chart(data["attention"])
+    with tabs[4]:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption("Global")
+            st.dataframe(data["eval_global"] if data["eval_global"] is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+        with c2:
+            st.caption("Horizon")
+            st.dataframe(data["eval_horizon"] if data["eval_horizon"] is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+        with c3:
+            st.caption("Emiten")
+            st.dataframe(data["eval_ticker"] if data["eval_ticker"] is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
+
+
+def page_market_data(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
+    hero("Market Data Lab", "Eksplorasi harga dan indikator teknikal. Candlestick digunakan ketika data OHLC lengkap; line chart dipakai sebagai fallback yang lebih ringan.")
+    prices = filter_df(data["prices"], ticker, dates)
+    if prices is None or prices.empty:
+        st.info("Data harga belum tersedia.")
+        return
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Baris harga", fmt(len(prices)))
+    c2.metric("Emiten", fmt(prices["ticker"].nunique() if "ticker" in prices.columns else 0))
+    c3.metric("Close terakhir", rupiah(latest_close(prices)))
+    if "volume" in prices.columns:
+        c4.metric("Volume rata-rata", fmt(pd.to_numeric(prices["volume"], errors="coerce").mean()))
+    else:
+        c4.metric("Volume rata-rata", "-")
+
+    price_chart(prices, "Market price action")
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        indicators = [c for c in TECH_FEATURES if c in prices.columns and c not in {"close", "volume"}]
+        if indicators:
+            selected = st.selectbox("Indikator teknikal", indicators)
+            dc = date_col(prices)
+            fig = px.line(prices.sort_values(dc), x=dc, y=selected, color_discrete_sequence=["#38BDF8"])
+            fig.update_traces(line=dict(width=3))
+            st.plotly_chart(apply_fig_theme(fig, 390, f"Tren {selected}"), use_container_width=True)
+        else:
+            st.info("Indikator teknikal belum tersedia.")
+    with right:
+        corr_cols = [c for c in TECH_FEATURES if c in prices.columns and pd.api.types.is_numeric_dtype(prices[c])]
+        if len(corr_cols) >= 2:
+            corr = prices[corr_cols].corr(numeric_only=True)
+            fig = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="Turbo")
+            st.plotly_chart(apply_fig_theme(fig, 390, "Korelasi indikator"), use_container_width=True)
+        else:
+            st.info("Kolom numerik belum cukup untuk korelasi.")
+    with st.expander("Tabel data harga"):
+        st.dataframe(prices.tail(500), use_container_width=True, hide_index=True)
+
+
+def page_sentiment(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
+    hero("Sentiment Intelligence", "Menganalisis cakupan berita, distribusi label sentimen, dan fitur sentimen harian yang dipakai oleh LLM‑TFT.")
     news = filter_df(data["news"], ticker, dates)
     articles = filter_df(data["articles"], ticker, dates)
     daily = filter_df(data["daily"], ticker, dates)
-    show_news(news)
-    show_label_sentiment(articles, daily)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Berita bersih", fmt(len(news) if news is not None else 0))
+    c2.metric("Artikel berlabel", fmt(len(articles) if articles is not None else 0))
+    c3.metric("Hari sentimen", fmt(len(daily) if daily is not None else 0))
+    c4.metric("Sumber", fmt(news["source"].nunique() if news is not None and "source" in news.columns else 0))
+
+    left, right = st.columns([1.1, 1], gap="large")
+    with left:
+        if news is not None and not news.empty and date_col(news):
+            dc = date_col(news)
+            timeline = news.dropna(subset=[dc]).assign(day=lambda x: x[dc].dt.date).groupby("day").size().reset_index(name="Jumlah")
+            fig = px.area(timeline, x="day", y="Jumlah", color_discrete_sequence=["#38BDF8"])
+            fig.update_traces(line=dict(width=3))
+            st.plotly_chart(apply_fig_theme(fig, 410, "Volume berita harian"), use_container_width=True)
+        else:
+            st.info("Timeline berita belum tersedia.")
+    with right:
+        final_col = find_col(articles, FINAL_LABELS)
+        if articles is not None and not articles.empty and final_col:
+            label_map = {-1: "Negatif", 0: "Netral", 1: "Positif", "-1": "Negatif", "0": "Netral", "1": "Positif"}
+            counts = articles[final_col].map(label_map).fillna(articles[final_col].astype(str)).value_counts().reset_index()
+            counts.columns = ["Sentimen", "Jumlah"]
+            fig = px.pie(counts, names="Sentimen", values="Jumlah", hole=0.58, color="Sentimen", color_discrete_map=MODEL_COLORS)
+            st.plotly_chart(apply_fig_theme(fig, 410, "Distribusi label sentimen"), use_container_width=True)
+        else:
+            st.info("Label sentimen artikel belum tersedia.")
+
+    left2, right2 = st.columns([1.15, 1], gap="large")
+    with left2:
+        if daily is not None and not daily.empty and date_col(daily):
+            available = [c for c in SENT_FEATURES if c in daily.columns]
+            if available:
+                selected = st.selectbox("Fitur sentimen harian", available)
+                dc = date_col(daily)
+                fig = px.line(daily.sort_values(dc), x=dc, y=selected, color_discrete_sequence=["#F97316"])
+                fig.update_traces(line=dict(width=3))
+                st.plotly_chart(apply_fig_theme(fig, 400, f"Tren {selected}"), use_container_width=True)
+            else:
+                st.info("Fitur sentimen harian belum tersedia.")
+        else:
+            st.info("Data sentimen harian belum tersedia.")
+    with right2:
+        if news is not None and not news.empty and "source" in news.columns:
+            sources = news["source"].fillna("Tidak diketahui").value_counts().head(12).sort_values().reset_index()
+            sources.columns = ["Sumber", "Jumlah"]
+            fig = px.bar(sources, x="Jumlah", y="Sumber", orientation="h", color="Jumlah", color_continuous_scale="Bluered")
+            st.plotly_chart(apply_fig_theme(fig, 400, "Top sumber berita"), use_container_width=True)
+        else:
+            st.info("Kolom sumber berita belum tersedia.")
+
+    with st.expander("Tabel artikel/berita"):
+        table = articles if articles is not None and not articles.empty else news
+        st.dataframe(table.tail(500) if table is not None else pd.DataFrame(), use_container_width=True, hide_index=True)
 
 
-def show_news(news: pd.DataFrame | None) -> None:
-    st.subheader("Data Berita")
-    c1, c2 = st.columns(2)
-    c1.metric("Jumlah Berita", fmt(len(news) if news is not None else 0))
-    c2.metric("Sumber Berita", fmt(news["source"].nunique() if news is not None and "source" in news else 0))
-    if news is None or news.empty:
-        st.info("Data berita belum tersedia.")
-        return
-    show_news_timeline(news)
-    show_source_chart(news)
+def file_status_rows() -> pd.DataFrame:
+    rows = []
+    for name, paths in PATHS.items():
+        found = first_existing(paths)
+        rows.append({
+            "Komponen": name,
+            "Status": "OK" if found else "Belum ada",
+            "Path aktif": str(found.relative_to(ROOT)) if found and found.is_relative_to(ROOT) else str(found) if found else "-",
+            "Ukuran": fmt(found.stat().st_size) if found else "-",
+        })
+    for model, scenario, path in CHECKPOINTS:
+        rows.append({
+            "Komponen": f"Checkpoint {model} {scenario}",
+            "Status": "OK" if path.exists() and path.stat().st_size > 1024 else "Periksa",
+            "Path aktif": str(path.relative_to(ROOT)) if path.exists() and path.is_relative_to(ROOT) else str(path),
+            "Ukuran": fmt(path.stat().st_size) if path.exists() else "-",
+        })
+    return pd.DataFrame(rows)
 
 
-def show_news_timeline(news: pd.DataFrame) -> None:
-    dc = date_col(news)
-    if not dc:
-        return
-    timeline = news.dropna(subset=[dc]).assign(day=lambda x: x[dc].dt.date)
-    timeline = timeline.groupby("day").size().reset_index(name="Jumlah")
-    fig = px.area(timeline, x="day", y="Jumlah", title="Tren Jumlah Berita Harian", color_discrete_sequence=["#38BDF8"])
-    fig.update_traces(line=dict(width=3))
-    st.plotly_chart(layout(fig, 430), use_container_width=True)
+def page_health(data: dict[str, pd.DataFrame | None], ticker: str | None, dates: Any) -> None:
+    hero("System Health", "Halaman ini membantu memastikan deploy bersih: path relatif, dependency, checkpoint, dan file CSV utama terlihat jelas.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Root repo", ROOT.name)
+    c2.metric("Torch", "OK" if torch is not None else "Error")
+    c3.metric("PyTorch Forecasting", "OK" if TemporalFusionTransformer is not None else "Error")
+    c4.metric("CUDA visible", os.getenv("CUDA_VISIBLE_DEVICES", ""))
 
-
-def show_source_chart(news: pd.DataFrame) -> None:
-    if "source" not in news.columns:
-        return
-    count = news["source"].fillna("Tidak diketahui").value_counts().reset_index()
-    count.columns = ["Sumber", "Jumlah"]
-    fig = px.bar(count.head(15), x="Sumber", y="Jumlah", title="Jumlah Berita per Sumber", color="Jumlah", color_continuous_scale="Bluered")
-    st.plotly_chart(layout(fig, 390), use_container_width=True)
-
-
-def show_label_sentiment(articles: pd.DataFrame | None, daily: pd.DataFrame | None) -> None:
-    st.subheader("Pelabelan Berita dan Sentimen Harian")
-    left, right = st.columns(2)
-    show_label_chart(articles, left)
-    show_sentiment_chart(daily, right)
-
-
-def show_label_chart(articles: pd.DataFrame | None, container) -> None:
-    final_col = find_col(articles, FINAL_LABELS)
-    if articles is None or articles.empty or not final_col:
-        container.info("Data pelabelan belum tersedia.")
-        return
-    label_map = {-1: "Negatif", 0: "Netral", 1: "Positif", "-1": "Negatif", "0": "Netral", "1": "Positif"}
-    count = articles[final_col].map(label_map).fillna(articles[final_col].astype(str)).value_counts().reset_index()
-    count.columns = ["Sentimen", "Jumlah"]
-    fig = px.pie(count, names="Sentimen", values="Jumlah", title="Distribusi Label Sentimen", hole=0.5, color_discrete_sequence=["#22C55E", "#FACC15", "#F43F5E"])
-    container.plotly_chart(layout(fig, 430), use_container_width=True)
-
-
-def show_sentiment_chart(daily: pd.DataFrame | None, container) -> None:
-    if daily is None or daily.empty:
-        container.info("Data sentimen harian belum tersedia.")
-        return
-    dc = date_col(daily) or "date"
-    available = [col for col in SENT_FEATURES if col in daily.columns]
-    if available and dc in daily.columns:
-        selected = container.selectbox("Fitur Sentimen", available)
-        fig = px.line(daily.sort_values(dc), x=dc, y=selected, title=f"Tren {selected}", color_discrete_sequence=COLORS)
-        fig.update_traces(line=dict(width=3))
-        container.plotly_chart(layout(fig, 430), use_container_width=True)
+    if IMPORT_MODEL_ERROR:
+        st.error(f"Import model error: {IMPORT_MODEL_ERROR}")
     else:
-        container.info("Kolom fitur sentimen harian belum tersedia.")
+        panel("Dependency model berhasil diimpor dalam mode CPU", "ok")
+
+    st.subheader("File readiness")
+    st.dataframe(file_status_rows(), hide_index=True, use_container_width=True)
+
+    with st.expander("Debug path"):
+        st.code(f"ROOT = {ROOT}\nCONFIG_PATH = {CONFIG_PATH}\nCHECKPOINTS = {[str(p) for _, _, p in CHECKPOINTS]}")
 
 
 # ============================================================
-# 9. SIDEBAR DAN MAIN APP
+# 9. MAIN
 # ============================================================
-def ticker_options(data: dict) -> list[str]:
-    source = data["master"] if data["master"] is not None and "ticker" in data["master"].columns else data["prices"]
-    if source is None or "ticker" not in source.columns:
-        return []
-    return sorted(source["ticker"].dropna().astype(str).unique().tolist())
-
-
-def date_filter(data: dict):
-    source = data["master"] if data["master"] is not None and date_col(data["master"]) else data["prices"]
-    if source is None:
-        return None
-    dc = date_col(source)
-    if not dc:
-        return None
-    valid = source[dc].dropna()
-    if valid.empty:
-        return None
-    start, end = valid.min(), valid.max()
-    if not (pd.notna(start) and pd.notna(end)):
-        return None
-    return st.date_input("Rentang Tanggal", value=(start.date(), end.date()), min_value=start.date(), max_value=end.date())
-
-
-
-def show_data_freshness(data: dict) -> None:
-    master = data.get("master")
-    dc = date_col(master)
-    if master is not None and not master.empty and dc:
-        last_date = pd.to_datetime(master[dc], errors="coerce").max()
-        st.caption(f"Data master terakhir: {last_date.date() if pd.notna(last_date) else '-'}")
-    st.caption(f"Tanggal run dashboard: {today_jakarta()}")
-
-
 def main() -> None:
-    st.set_page_config(page_title="StockForecast", page_icon="📈", layout="wide")
-    apply_style()
+    setup_page()
+    data = load_all_data()
+    page, ticker, dates, auto_update = sidebar(data)
+    logs = run_data_update_once_per_day(auto_update)
+    if logs:
+        with st.sidebar.expander("Log update"):
+            st.write("\n".join(logs))
+        data = load_all_data()
 
-    with st.sidebar:
-        st.markdown("## 📈 StockForecast")
-        st.caption("Dashboard prediksi saham Indonesia dengan TFT dan LLM-TFT")
-        st.divider()
-        auto_update = st.toggle("Auto update data harian", value=AUTO_UPDATE_DATA_ON_START)
-
-    update_logs = run_data_update_once_per_day(auto_update)
-    data = load_data()
-
-    with st.sidebar:
-        if update_logs:
-            with st.expander("Log update data harian"):
-                st.write("\n".join(update_logs))
-        show_data_freshness(data)
-        st.divider()
-        page = st.radio("Menu Dashboard", PAGES)
-        st.divider()
-        st.markdown("### Filter Data")
-        tickers = ticker_options(data)
-        selected_ticker = st.selectbox("Emiten", tickers) if tickers else None
-        selected_dates = date_filter(data)
-
-    if page == "Model dan Prediksi":
-        render_model_page(data, selected_ticker, selected_dates)
-    elif page == "Evaluasi Model":
-        render_eval_page(data, selected_ticker, selected_dates)
-    elif page == "Data Harga Saham":
-        render_price_page(data, selected_ticker, selected_dates)
+    if page == "Executive Overview":
+        page_overview(data, ticker, dates)
+    elif page == "Prediction Studio":
+        page_prediction(data, ticker, dates)
+    elif page == "Model Performance":
+        page_performance(data, ticker, dates)
+    elif page == "Market Data Lab":
+        page_market_data(data, ticker, dates)
+    elif page == "Sentiment Intelligence":
+        page_sentiment(data, ticker, dates)
     else:
-        render_news_page(data, selected_ticker, selected_dates)
+        page_health(data, ticker, dates)
 
 
 if __name__ == "__main__":
