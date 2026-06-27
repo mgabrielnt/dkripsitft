@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+# Paksa mode CPU sejak awal agar aman di Streamlit Cloud yang tidak memiliki GPU NVIDIA.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import re
 import sys
 import subprocess
@@ -390,6 +393,14 @@ def prep_master_for_model(df: pd.DataFrame | None) -> pd.DataFrame:
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def load_tft(path_text: str):
+    """Load checkpoint TFT/LLM-TFT hanya di CPU.
+
+    Streamlit Cloud umumnya tidak menyediakan NVIDIA GPU. Checkpoint yang dilatih
+    di GPU kadang menyimpan device CUDA di hyperparameters/loss/metric object,
+    sehingga map_location saja belum cukup. Fungsi ini membaca checkpoint ke CPU,
+    membersihkan objek yang sering memicu CUDA, menyimpan checkpoint bersih, lalu
+    memuat model dari checkpoint bersih.
+    """
     path = Path(path_text)
 
     if TemporalFusionTransformer is None or torch is None:
@@ -403,6 +414,16 @@ def load_tft(path_text: str):
             f"checkpoint terlihat terlalu kecil atau kosong: {path}. "
             "Pastikan file .ckpt asli ikut ter-commit atau Git LFS aktif di Streamlit Cloud."
         )
+
+    try:
+        torch.set_grad_enabled(False)
+        if hasattr(torch, "set_default_device"):
+            torch.set_default_device("cpu")
+    except Exception:
+        pass
+
+    def cpu_map(storage, _location):
+        return storage.cpu()
 
     def find_key_recursive(obj, target_key: str):
         if isinstance(obj, dict):
@@ -435,60 +456,122 @@ def load_tft(path_text: str):
                 removed += remove_key_recursive(item, target_key)
         return removed
 
+    def force_cpu_recursive(obj):
+        """Pindahkan tensor/device CUDA ke CPU tanpa mengubah struktur utama."""
+        try:
+            if torch.is_tensor(obj):
+                return obj.detach().cpu()
+        except Exception:
+            pass
+
+        if isinstance(obj, torch.device):
+            return torch.device("cpu")
+
+        if isinstance(obj, dict):
+            cleaned = {}
+            for key, value in obj.items():
+                key_norm = norm(key)
+                if key_norm in {"device", "accelerator", "devices", "gpus", "autoselectgpus"}:
+                    # Jangan bawa konfigurasi GPU dari training ke deployment CPU.
+                    if key_norm == "accelerator":
+                        cleaned[key] = "cpu"
+                    elif key_norm == "device":
+                        cleaned[key] = torch.device("cpu")
+                    elif key_norm == "devices":
+                        cleaned[key] = 1
+                    else:
+                        cleaned[key] = None
+                else:
+                    cleaned[key] = force_cpu_recursive(value)
+            return cleaned
+
+        if isinstance(obj, list):
+            return [force_cpu_recursive(item) for item in obj]
+
+        if isinstance(obj, tuple):
+            return tuple(force_cpu_recursive(item) for item in obj)
+
+        # Beberapa object metric/loss lama menyimpan atribut device CUDA.
+        if hasattr(obj, "__dict__"):
+            try:
+                for attr, value in list(vars(obj).items()):
+                    if norm(attr) in {"device", "accelerator", "devices", "gpus"}:
+                        setattr(obj, attr, torch.device("cpu"))
+                    else:
+                        setattr(obj, attr, force_cpu_recursive(value))
+            except Exception:
+                pass
+        return obj
+
     def attach_dataset_parameters(model, params):
         if params is not None:
             try:
                 setattr(model, "dataset_parameters", params)
             except Exception:
                 pass
+        try:
+            model.eval()
+            model.cpu()
+            for param in model.parameters():
+                param.requires_grad_(False)
+        except Exception:
+            pass
         return model
 
     try:
-        ckpt = torch.load(str(path), map_location=torch.device("cpu"), weights_only=False)
+        ckpt = torch.load(str(path), map_location=cpu_map, weights_only=False)
+        ckpt = force_cpu_recursive(ckpt)
         saved_dataset_parameters = find_key_recursive(ckpt, "dataset_parameters") if isinstance(ckpt, dict) else None
     except Exception as exc:
-        return None, f"gagal membaca checkpoint: {type(exc).__name__}: {exc}"
-
-    # Coba load langsung dulu. Ini paling aman untuk checkpoint yang versinya sudah cocok.
-    direct_error = None
-    try:
-        model = TemporalFusionTransformer.load_from_checkpoint(
-            str(path),
-            map_location=torch.device("cpu"),
-        )
-        model.eval()
-        return attach_dataset_parameters(model, saved_dataset_parameters), None
-    except TypeError:
-        pass
-    except Exception as direct_exc:
-        # Beberapa checkpoint lama tetap bisa dimuat setelah hyperparameter dibersihkan.
-        direct_error = f"{type(direct_exc).__name__}: {direct_exc}"
-    else:
-        direct_error = None
+        return None, f"gagal membaca checkpoint dalam mode CPU: {type(exc).__name__}: {exc}"
 
     if not isinstance(ckpt, dict):
-        return None, f"gagal load checkpoint langsung. Detail: {direct_error or 'format checkpoint tidak dikenali'}"
+        try:
+            model = TemporalFusionTransformer.load_from_checkpoint(str(path), map_location="cpu", strict=False)
+            return attach_dataset_parameters(model, None), None
+        except Exception as exc:
+            return None, f"gagal load checkpoint non-dict di CPU: {type(exc).__name__}: {exc}"
 
     removed_keys = []
     clean_dir = ROOT / ".streamlit_ckpt_cache"
     clean_dir.mkdir(parents=True, exist_ok=True)
-    clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_clean.ckpt"
-    last_error = direct_error
+    clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_cpu_clean.ckpt"
+    last_error = None
 
-    # Beberapa versi pytorch-forecasting/lightning menolak hyperparameter lama.
-    for bad_key in ["mask_bias", "logging_metrics", "monotone_constraints"]:
+    # Kunci ini tidak dibutuhkan untuk inference dan sering memicu error versi/CUDA.
+    always_remove = [
+        "mask_bias",
+        "logging_metrics",
+        "monotone_constraints",
+        "monotone_constaints",
+        "loss",
+        "optimizer",
+        "optimizer_params",
+        "lr_scheduler",
+        "reduce_on_plateau_patience",
+    ]
+    for bad_key in always_remove:
         count = remove_key_recursive(ckpt, bad_key)
         if count > 0:
             removed_keys.append(f"{bad_key}({count})")
 
-    for _ in range(50):
+    # Bersihkan metadata trainer/checkpoint yang mengarah ke GPU.
+    if "hyper_parameters" in ckpt and isinstance(ckpt["hyper_parameters"], dict):
+        hp = ckpt["hyper_parameters"]
+        hp["accelerator"] = "cpu"
+        hp["devices"] = 1
+        hp.pop("gpus", None)
+        hp.pop("auto_select_gpus", None)
+
+    for _ in range(80):
         try:
+            ckpt = force_cpu_recursive(ckpt)
             torch.save(ckpt, clean_path)
             model = TemporalFusionTransformer.load_from_checkpoint(
                 str(clean_path),
-                map_location=torch.device("cpu"),
+                map_location="cpu",
+                strict=False,
             )
-            model.eval()
             return attach_dataset_parameters(model, saved_dataset_parameters), None
 
         except TypeError as exc:
@@ -496,28 +579,46 @@ def load_tft(path_text: str):
             last_error = msg
             marker = "unexpected keyword argument '"
             if marker not in msg:
-                return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
+                return None, f"gagal load checkpoint CPU: TypeError: {msg}. Parameter dihapus: {removed_keys}"
 
             bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
             if not bad_key:
-                return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
+                return None, f"gagal load checkpoint CPU: TypeError: {msg}. Parameter dihapus: {removed_keys}"
 
             count = remove_key_recursive(ckpt, bad_key)
             removed_keys.append(f"{bad_key}({count})")
             if count == 0:
                 return None, (
-                    f"gagal load checkpoint: TypeError: {msg}. "
+                    f"gagal load checkpoint CPU: TypeError: {msg}. "
                     f"Parameter tidak ditemukan saat recursive-clean. Parameter dihapus: {removed_keys}"
                 )
 
+        except RuntimeError as exc:
+            msg = str(exc)
+            last_error = msg
+            cuda_markers = ["cuda", "nvidia", "gpu"]
+            if any(marker in msg.lower() for marker in cuda_markers):
+                # Jika masih ada jejak CUDA, bersihkan loss/metric/object tambahan lalu ulangi.
+                extra_remove = ["loss", "logging_metrics", "metrics", "metric", "device", "accelerator", "devices", "gpus"]
+                removed_any = 0
+                for bad_key in extra_remove:
+                    count = remove_key_recursive(ckpt, bad_key)
+                    removed_any += count
+                    if count > 0:
+                        removed_keys.append(f"{bad_key}({count})")
+                ckpt = force_cpu_recursive(ckpt)
+                if removed_any > 0:
+                    continue
+            return None, f"gagal load checkpoint CPU: RuntimeError: {msg}. Parameter dihapus: {removed_keys}"
+
         except Exception as exc:
             return None, (
-                f"gagal load checkpoint: {type(exc).__name__}: {exc}. "
+                f"gagal load checkpoint CPU: {type(exc).__name__}: {exc}. "
                 f"Parameter dihapus: {removed_keys}"
             )
 
     return None, (
-        f"gagal load checkpoint setelah auto-clean. "
+        f"gagal load checkpoint CPU setelah auto-clean. "
         f"Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
     )
     
