@@ -32,14 +32,37 @@ except Exception as exc:
 # ============================================================
 # 1. KONFIGURASI TUNGGAL
 # ============================================================
-ROOT = Path(__file__).resolve().parents[2]
+def resolve_project_root() -> Path:
+    """Cari root repository secara aman untuk local dan Streamlit Cloud.
+
+    App ini normalnya berada di src/dashboard/app.py. Namun fungsi ini tetap
+    aman jika file dijalankan dari lokasi lain, misalnya streamlit_app.py wrapper.
+    """
+    current = Path(__file__).resolve()
+    candidates = [current.parent, *current.parents]
+
+    # Prioritas utama: root repo yang berisi configs dan src.
+    for base in candidates:
+        if (base / "configs").exists() and (base / "src").exists():
+            return base
+
+    # Fallback: root repo yang minimal punya salah satu folder proyek.
+    for base in candidates:
+        if any((base / marker).exists() for marker in ("data", "modelssss", "reportss", "configs")):
+            return base
+
+    # Fallback terakhir untuk struktur src/dashboard/app.py.
+    return current.parents[2] if len(current.parents) >= 3 else current.parent
+
+
+ROOT = resolve_project_root()
 DATA = ROOT / "data"
 INTERIM = DATA / "interim"
 PROCESSED = DATA / "processed"
 REPORTSS = ROOT / "reportss"
 REPORTS = ROOT / "reports"
 CONFIG_PATH = ROOT / "configs" / "model_tft.yaml"
-UPDATE_MARKER = ROOT / ".dashboard_last_data_update"
+UPDATE_MARKER = Path(os.getenv("STOCKFORECAST_UPDATE_MARKER", str(ROOT / ".dashboard_last_data_update")))
 JAKARTA_TZ = ZoneInfo("Asia/Jakarta")
 
 # Model hanya memakai checkpoint final ini. Tidak ada training/evaluasi ulang dari dashboard.
@@ -83,7 +106,8 @@ MODEL_COLORS = {
 }
 
 # Auto update data harian. Tidak menjalankan training model.
-AUTO_UPDATE_DATA_ON_START = True
+AUTO_UPDATE_DATA_ON_START = os.getenv("STOCKFORECAST_AUTO_UPDATE", "false").strip().lower() in {"1", "true", "yes", "y"}
+AUTO_COMMAND_TIMEOUT_SECONDS = int(os.getenv("STOCKFORECAST_UPDATE_TIMEOUT", "180"))
 AUTO_DATA_COMMANDS = [
     ("Ambil harga Yahoo Finance", [sys.executable, "-m", "src.data.download_prices_yahoo"]),
     ("Hitung indikator teknikal", [sys.executable, "-m", "src.data.compute_technical_indicators"]),
@@ -213,6 +237,16 @@ def find_contains_col(df: pd.DataFrame | None, include: list[str], exclude: list
     return None
 
 
+def normalize_date_range(dates) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """Normalisasi nilai st.date_input agar tidak error saat user memilih satu tanggal."""
+    if dates is None:
+        return None
+    if isinstance(dates, (list, tuple)) and len(dates) == 2 and dates[0] and dates[1]:
+        start, end = pd.to_datetime(dates[0]), pd.to_datetime(dates[1])
+        return (min(start, end), max(start, end))
+    return None
+
+
 def filter_df(df: pd.DataFrame | None, ticker: str | None, dates) -> pd.DataFrame | None:
     if df is None:
         return None
@@ -220,8 +254,9 @@ def filter_df(df: pd.DataFrame | None, ticker: str | None, dates) -> pd.DataFram
     if ticker and "ticker" in out.columns:
         out = out[out["ticker"].astype(str).eq(str(ticker))]
     dc = date_col(out)
-    if dc and dates and len(dates) == 2:
-        start, end = pd.to_datetime(dates[0]), pd.to_datetime(dates[1])
+    date_range = normalize_date_range(dates)
+    if dc and date_range is not None:
+        start, end = date_range
         out = out[(out[dc] >= start) & (out[dc] <= end)]
     return out
 
@@ -249,7 +284,7 @@ def run_data_update_once_per_day(enabled: bool = True) -> list[str]:
                 continue
             status.update(label=f"Menjalankan: {label}")
             try:
-                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=900)
+                result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=AUTO_COMMAND_TIMEOUT_SECONDS)
                 if result.returncode == 0:
                     logs.append(f"OK {label}")
                 else:
@@ -257,7 +292,11 @@ def run_data_update_once_per_day(enabled: bool = True) -> list[str]:
                     logs.append(f"GAGAL {label}: {' | '.join(err)}")
             except Exception as exc:
                 logs.append(f"GAGAL {label}: {type(exc).__name__}: {exc}")
-        UPDATE_MARKER.write_text(today_jakarta(), encoding="utf-8")
+        try:
+            UPDATE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            UPDATE_MARKER.write_text(today_jakarta(), encoding="utf-8")
+        except Exception as exc:
+            logs.append(f"GAGAL tulis marker update: {type(exc).__name__}: {exc}")
         status.update(label="Update data harian selesai. Dashboard memakai checkpoint tetap.", state="complete")
     return logs
 
@@ -359,104 +398,128 @@ def load_tft(path_text: str):
     if not path.exists():
         return None, f"checkpoint tidak ditemukan: {path}"
 
+    if path.stat().st_size < 1024:
+        return None, (
+            f"checkpoint terlihat terlalu kecil atau kosong: {path}. "
+            "Pastikan file .ckpt asli ikut ter-commit atau Git LFS aktif di Streamlit Cloud."
+        )
+
+    def find_key_recursive(obj, target_key: str):
+        if isinstance(obj, dict):
+            if target_key in obj:
+                return obj[target_key]
+            for value in obj.values():
+                found = find_key_recursive(value, target_key)
+                if found is not None:
+                    return found
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                found = find_key_recursive(item, target_key)
+                if found is not None:
+                    return found
+        return None
+
     def remove_key_recursive(obj, target_key: str) -> int:
         removed = 0
-
         if isinstance(obj, dict):
             if target_key in obj:
                 obj.pop(target_key, None)
                 removed += 1
-
             for value in list(obj.values()):
                 removed += remove_key_recursive(value, target_key)
-
         elif isinstance(obj, list):
             for item in obj:
                 removed += remove_key_recursive(item, target_key)
-
         elif isinstance(obj, tuple):
             for item in obj:
                 removed += remove_key_recursive(item, target_key)
-
         return removed
+
+    def attach_dataset_parameters(model, params):
+        if params is not None:
+            try:
+                setattr(model, "dataset_parameters", params)
+            except Exception:
+                pass
+        return model
 
     try:
         ckpt = torch.load(str(path), map_location=torch.device("cpu"), weights_only=False)
+        saved_dataset_parameters = find_key_recursive(ckpt, "dataset_parameters") if isinstance(ckpt, dict) else None
+    except Exception as exc:
+        return None, f"gagal membaca checkpoint: {type(exc).__name__}: {exc}"
 
-        if not isinstance(ckpt, dict):
+    # Coba load langsung dulu. Ini paling aman untuk checkpoint yang versinya sudah cocok.
+    direct_error = None
+    try:
+        model = TemporalFusionTransformer.load_from_checkpoint(
+            str(path),
+            map_location=torch.device("cpu"),
+        )
+        model.eval()
+        return attach_dataset_parameters(model, saved_dataset_parameters), None
+    except TypeError:
+        pass
+    except Exception as direct_exc:
+        # Beberapa checkpoint lama tetap bisa dimuat setelah hyperparameter dibersihkan.
+        direct_error = f"{type(direct_exc).__name__}: {direct_exc}"
+    else:
+        direct_error = None
+
+    if not isinstance(ckpt, dict):
+        return None, f"gagal load checkpoint langsung. Detail: {direct_error or 'format checkpoint tidak dikenali'}"
+
+    removed_keys = []
+    clean_dir = ROOT / ".streamlit_ckpt_cache"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_clean.ckpt"
+    last_error = direct_error
+
+    # Beberapa versi pytorch-forecasting/lightning menolak hyperparameter lama.
+    for bad_key in ["mask_bias", "logging_metrics", "monotone_constraints"]:
+        count = remove_key_recursive(ckpt, bad_key)
+        if count > 0:
+            removed_keys.append(f"{bad_key}({count})")
+
+    for _ in range(50):
+        try:
+            torch.save(ckpt, clean_path)
             model = TemporalFusionTransformer.load_from_checkpoint(
-                str(path),
+                str(clean_path),
                 map_location=torch.device("cpu"),
             )
             model.eval()
-            return model, None
+            return attach_dataset_parameters(model, saved_dataset_parameters), None
 
-        removed_keys = []
+        except TypeError as exc:
+            msg = str(exc)
+            last_error = msg
+            marker = "unexpected keyword argument '"
+            if marker not in msg:
+                return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
 
-        for bad_key in [
-            "mask_bias",
-            "dataset_parameters",
-            "logging_metrics",
-            "monotone_constraints",
-        ]:
+            bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
+            if not bad_key:
+                return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
+
             count = remove_key_recursive(ckpt, bad_key)
-            if count > 0:
-                removed_keys.append(f"{bad_key}({count})")
-
-        clean_dir = ROOT / ".streamlit_ckpt_cache"
-        clean_dir.mkdir(parents=True, exist_ok=True)
-        clean_path = clean_dir / f"{path.parent.parent.name}_{path.parent.name}_clean.ckpt"
-
-        last_error = None
-
-        for _ in range(50):
-            torch.save(ckpt, clean_path)
-
-            try:
-                model = TemporalFusionTransformer.load_from_checkpoint(
-                    str(clean_path),
-                    map_location=torch.device("cpu"),
-                )
-                model.eval()
-                return model, None
-
-            except TypeError as exc:
-                msg = str(exc)
-                last_error = msg
-
-                marker = "unexpected keyword argument '"
-                if marker not in msg:
-                    return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
-
-                bad_key = msg.split(marker, 1)[1].split("'", 1)[0]
-
-                if not bad_key:
-                    return None, f"gagal load checkpoint: TypeError: {msg}. Parameter dihapus: {removed_keys}"
-
-                count = remove_key_recursive(ckpt, bad_key)
-                removed_keys.append(f"{bad_key}({count})")
-
-                if count == 0:
-                    return None, (
-                        f"gagal load checkpoint: TypeError: {msg}. "
-                        f"Parameter tidak ditemukan saat recursive-clean. Parameter dihapus: {removed_keys}"
-                    )
-
-                continue
-
-            except Exception as exc:
+            removed_keys.append(f"{bad_key}({count})")
+            if count == 0:
                 return None, (
-                    f"gagal load checkpoint: {type(exc).__name__}: {exc}. "
-                    f"Parameter dihapus: {removed_keys}"
+                    f"gagal load checkpoint: TypeError: {msg}. "
+                    f"Parameter tidak ditemukan saat recursive-clean. Parameter dihapus: {removed_keys}"
                 )
 
-        return None, (
-            f"gagal load checkpoint setelah auto-clean. "
-            f"Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
-        )
+        except Exception as exc:
+            return None, (
+                f"gagal load checkpoint: {type(exc).__name__}: {exc}. "
+                f"Parameter dihapus: {removed_keys}"
+            )
 
-    except Exception as exc:
-        return None, f"gagal membaca checkpoint: {type(exc).__name__}: {exc}"
+    return None, (
+        f"gagal load checkpoint setelah auto-clean. "
+        f"Parameter dihapus: {removed_keys}. Error terakhir: {last_error}"
+    )
     
 @st.cache_data(show_spinner=False)
 def model_config() -> tuple[int, int]:
@@ -824,6 +887,9 @@ def show_summary_cards(eval_global: pd.DataFrame | None) -> None:
         st.info("Ringkasan evaluasi belum tersedia.")
         return
     metrics = [m for m in ORDER if m in data["Metric"].unique().tolist()]
+    if not metrics:
+        st.info("Kolom metrik evaluasi belum sesuai atau belum tersedia.")
+        return
     cols = st.columns(min(len(metrics), 5))
     for col, metric in zip(cols, metrics):
         row = best_row(data, metric)
@@ -1041,6 +1107,8 @@ def show_sentiment_chart(daily: pd.DataFrame | None, container) -> None:
         fig = px.line(daily.sort_values(dc), x=dc, y=selected, title=f"Tren {selected}", color_discrete_sequence=COLORS)
         fig.update_traces(line=dict(width=3))
         container.plotly_chart(layout(fig, 430), use_container_width=True)
+    else:
+        container.info("Kolom fitur sentimen harian belum tersedia.")
 
 
 # ============================================================
