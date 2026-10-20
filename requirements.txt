@@ -1,0 +1,14 @@
+pandas
+numpy
+pyyaml
+requests
+beautifulsoup4
+feedparser
+yfinance
+python-dotenv
+openai
+torch
+lightning
+pytorch-forecasting
+streamlit
+plotly
